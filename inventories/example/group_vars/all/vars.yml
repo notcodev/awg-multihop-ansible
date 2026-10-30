@@ -1,0 +1,33 @@
+---
+# domains and ports
+entry_domain: entry.example.com
+exit_domain: exit.example.com
+entry_awg_port: 51820
+exit_awg_port: 51821
+ssh_port: 22
+extra_input_tcp_ports: []
+
+# addressing and image
+entry_awg_subnet: 10.8.1.0/24
+uplink_subnet: 10.9.0.0/30
+uplink_mtu: 1280
+awg_base_image_digest: sha256:CHANGE_ME
+
+# split routing
+split_routing_enabled: true
+split_direct_countries: [ru]
+split_country_list_url: "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+split_direct_cidrs: []
+split_direct_domains: []
+split_force_exit_cidrs: []
+
+# backups
+backup_s3_endpoint: https://s3.example.com
+backup_s3_region: CHANGE_ME
+backup_s3_bucket: CHANGE_ME
+backup_s3_prefix: multihop
+backup_interval: 15min
+backup_age_recipient: age1CHANGE_ME
+
+# DNS
+dns_backend: manual

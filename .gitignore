@@ -1,1 +1,9 @@
 .superpowers/
+.vault-pass
+collections/
+.venv/
+tests/render/out/
+*.decrypted*
+__pycache__/
+.pytest_cache/
+.DS_Store
