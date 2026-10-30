@@ -1,0 +1,100 @@
+---
+# Deterministic fixture for template render tests. Values are test-only.
+inventory_hostname: fixture-host
+public_iface: eth0
+common_input_udp_ports: []
+extra_input_tcp_ports: []
+
+entry_domain: entry.example.com
+exit_domain: exit.example.com
+entry_awg_port: 51470
+exit_awg_port: 27887
+ssh_port: 22
+
+entry_awg_subnet: 10.8.1.0/24
+uplink_subnet: 10.9.0.0/30
+uplink_mtu: 1280
+awg_base_image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+split_routing_enabled: true
+split_direct_countries: [ru]
+split_country_list_url: "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+split_direct_cidrs: []
+split_direct_domains: []
+split_force_exit_cidrs: []
+
+backup_s3_endpoint: https://s3.example.com
+backup_s3_region: us-east-1
+backup_s3_bucket: multihop-test
+backup_s3_prefix: multihop
+backup_interval: 15min
+backup_age_recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+dns_backend: manual
+
+vault_backup_writer: {access_key: WRITERKEY, secret_key: WRITERSECRET}
+vault_backup_reader: {access_key: READERKEY, secret_key: READERSECRET}
+vault_backup_age_identity: AGE-SECRET-KEY-FIXTURE
+
+vault_entry_awg:
+  private_key: qB1AyAY/ioRDcSs9acJyGQXqOX/ad5fpYL5CEjz5aWY=
+  public_key: W0n9VnESdsdaTsWYhphIj4IMrorDbkckkTp/fWvgTmg=
+  psk: AG3T+iX+879u20X3rnbCoqwBBFT5mu8aPKKTavoK3G4=
+  params:
+    jc: '4'
+    jmin: '10'
+    jmax: '50'
+    s1: '12'
+    s2: '12'
+    s3: '12'
+    s4: '12'
+    h1: '1'
+    h2: '2'
+    h3: '3'
+    h4: '4'
+    i1: <r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>
+    i2: ''
+    i3: ''
+    i4: ''
+    i5: ''
+    header_protection_key: MAlws2tm7X/DIZgwOf3jT6Gb3UmzLJzIRdVRovL/A28=
+    content_padding_addition: ''
+    rekey_after_time: 100-120
+    rekey_timeout: 3-7
+    reject_after_time: 150-180
+    keepalive_timeout: 5-15
+    max_handshake_attempts: 15-20
+    random_trailers: 'on'
+    disable_cookies: 'on'
+vault_link_awg:
+  exit_private_key: UA7d1m3FJpE7IT6ofe4fyBfgoYFBkgNF2IN/zBvqg2g=
+  exit_public_key: 4oJHxVTJT48b2TYy1bZOQf/r1oSJDNpV+WUgAtiAj30=
+  psk: ODQEP0ibd9FZTLfzIcaQIlRqyX2Idg5l85pWf/HBxXY=
+  params:
+    jc: '6'
+    jmin: '10'
+    jmax: '50'
+    s1: '12'
+    s2: '12'
+    s3: '12'
+    s4: '12'
+    h1: '1'
+    h2: '2'
+    h3: '3'
+    h4: '4'
+    i1: <r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>
+    i2: ''
+    i3: ''
+    i4: ''
+    i5: ''
+    header_protection_key: UKrjmcovTsH9XlLhDG6vQtf351ObToeVxDxmf4qNpGg=
+    content_padding_addition: ''
+    rekey_after_time: 100-120
+    rekey_timeout: 3-7
+    reject_after_time: 150-180
+    keepalive_timeout: 5-15
+    max_handshake_attempts: 15-20
+    random_trailers: 'on'
+    disable_cookies: 'on'
+vault_uplink_entry:
+  private_key: 6DtBBYtIL+8u19Z4Xt+AVOK1LpejjkDBcsQwll3YcWU=
+  public_key: f8mW4F2meajkmhRZIr+FocB3Y+fbvFgIRJsjNKBz/R4=

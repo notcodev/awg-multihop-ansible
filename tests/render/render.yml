@@ -1,0 +1,20 @@
+---
+- name: Render templates for tests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - fixture_vars.yml
+  tasks:
+    - name: Create output dir
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/out"
+        state: directory
+        mode: "0755"
+
+    - name: Render each template
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ playbook_dir }}/out/{{ item.dest }}"
+        mode: "0644"
+      loop: "{{ render_list }}"

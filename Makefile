@@ -1,5 +1,10 @@
 .PHONY: lint test collections
 
+# ansible.cfg points at a gitignored .vault-pass; fall back to a dummy in fresh checkouts.
+ifeq ($(wildcard .vault-pass),)
+export ANSIBLE_VAULT_PASSWORD_FILE := tests/fixtures/vault-pass
+endif
+
 SCRIPTS := $(wildcard roles/*/files/multihop-*)
 PLAYBOOKS := $(wildcard playbooks/*.yml)
 
