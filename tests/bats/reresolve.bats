@@ -1,0 +1,83 @@
+load helpers
+
+PUB="4oJHxVTJT48b2TYy1bZOQf/r1oSJDNpV+WUgAtiAj30="
+
+setup() {
+  export MULTIHOP_ENV="$BATS_TEST_TMPDIR/multihop.env"
+  export STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
+  cat > "$MULTIHOP_ENV" <<ENV
+EXIT_DOMAIN=exit.example.com
+EXIT_PORT=27887
+EXIT_PUBKEY=$PUB
+ENV
+  # awg show <iface> endpoints: "<pubkey> <ip:port>" per peer
+  stub docker "$PUB 198.51.100.7:27887"
+  : > "$STUB_LOG"
+}
+
+# getent_answer <exit-code>: fake getent printing stdin as its answer.
+getent_answer() {
+  cat > "$BATS_TEST_TMPDIR/getent.out"
+  printf '#!/bin/sh\necho "getent $*" >> "$STUB_LOG"\ncat "%s"\nexit %s\n' \
+    "$BATS_TEST_TMPDIR/getent.out" "${1:-0}" > "$BATS_TEST_TMPDIR/bin/getent"
+  chmod +x "$BATS_TEST_TMPDIR/bin/getent"
+}
+
+@test "updates endpoint when DNS changed" {
+  getent_answer <<'A'
+203.0.113.9     STREAM exit.example.com
+203.0.113.9     DGRAM
+203.0.113.9     RAW
+203.0.113.10    STREAM
+A
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  grep -qx -e 'getent ahostsv4 exit.example.com' "$STUB_LOG"
+  grep -qx -e 'docker exec multihop-uplink awg show awg-uplink endpoints' "$STUB_LOG"
+  grep -qxF -e "docker exec multihop-uplink awg set awg-uplink peer $PUB endpoint 203.0.113.9:27887" "$STUB_LOG"
+}
+
+@test "no-op when same" {
+  stub getent "198.51.100.7    STREAM exit.example.com"
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  grep -q -e 'awg show' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG"
+}
+
+@test "port change alone updates endpoint" {
+  sed -i.bak 's/^EXIT_PORT=.*/EXIT_PORT=443/' "$MULTIHOP_ENV"
+  stub getent "198.51.100.7    STREAM exit.example.com"
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  grep -qxF -e "docker exec multihop-uplink awg set awg-uplink peer $PUB endpoint 198.51.100.7:443" "$STUB_LOG"
+}
+
+@test "empty resolution keeps endpoint" {
+  stub getent "" 0
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  ! grep -q -e 'awg set' "$STUB_LOG"
+}
+
+@test "getent failure keeps endpoint" {
+  stub getent "" 2
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  ! grep -q -e 'awg set' "$STUB_LOG"
+}
+
+@test "non-address answer keeps endpoint" {
+  stub getent "<html>     STREAM exit.example.com"
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  ! grep -q -e 'awg set' "$STUB_LOG"
+}
+
+@test "uplink container down fails without awg set" {
+  stub getent "203.0.113.9     STREAM exit.example.com"
+  stub docker "" 1
+  run_script multihop-reresolve
+  [ "$status" -ne 0 ]
+  ! grep -q -e 'awg set' "$STUB_LOG"
+}

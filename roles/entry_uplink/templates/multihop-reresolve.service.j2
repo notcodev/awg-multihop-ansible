@@ -1,0 +1,7 @@
+[Unit]
+Description=Re-resolve the exit domain for the multihop uplink
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/multihop-reresolve

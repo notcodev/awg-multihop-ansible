@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Entry-server policy routing and fail-closed firewall for user traffic coming
+# out of the app container through the Docker bridges ($BRIDGES).
+#
+# Traffic from a bridge is routed (ip rule priorities):
+#   10100  carries the direct mark 0x5a           -> main (split routing)
+#   10110  UDP from the AWG listen port (replies)  -> main
+#   10120  anything, main minus its default route  -> main (local/bridge nets)
+#   10130  everything else                         -> table 51820
+# Table 51820 holds `default dev awg-uplink` (added by the uplink container)
+# and a blackhole default, so with the uplink down traffic is dropped.
+# MULTIHOP-FWD (from DOCKER-USER) is the backstop: bridge -> public interface
+# is dropped unless direct-marked or an AWG reply.
+#
+# Ordering inside `up` is part of the guarantee: the firewall backstop and the
+# blackhole route are in place before any ip rule is touched, every iptables
+# chain is rebuilt and swapped in atomically, and ip rules are swapped through
+# a staging priority so a bridge is never left without a rule into 51820.
+# Runs before Docker at boot, so it must not depend on Docker's chains.
+set -euo pipefail
+
+MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
+# shellcheck disable=SC1090
+. "$MULTIHOP_ENV"
+
+: "${PUBLIC_IFACE:?PUBLIC_IFACE not set in $MULTIHOP_ENV}"
+: "${ENTRY_AWG_PORT:?ENTRY_AWG_PORT not set in $MULTIHOP_ENV}"
+: "${BRIDGES:?BRIDGES not set in $MULTIHOP_ENV}"
+RT_TABLES_DIR="${MULTIHOP_RT_TABLES_DIR:-/etc/iproute2/rt_tables.d}"
+
+UPLINK_IFACE=awg-uplink
+TABLE=51820
+TABLE_NAME=multihop
+DIRECT_MARK=0x5a/0xff
+DIRECT_SET=multihop_direct
+FORCE_EXIT_SET=multihop_force_exit
+RULE_PREFS="10100 10110 10120 10130"
+
+# drop_chain <table> <parent> <chain>: remove every jump from the parent to
+# the chain (whatever its match), then flush and delete the chain if present.
+drop_chain() {
+  local t="$1" parent="$2" c="$3" jump
+  while jump=$(iptables -t "$t" -S "$parent" 2>/dev/null | grep -m1 -e " -j $c\$"); do
+    # shellcheck disable=SC2086 # "-A <parent> <match> -j <chain>" -> -D args
+    iptables -t "$t" -D ${jump#-A }
+  done
+  if iptables -t "$t" -F "$c" 2>/dev/null; then
+    iptables -t "$t" -X "$c" 2>/dev/null || true
+  fi
+}
+
+# install_chain <table> <parent> <chain> [jump-match...] < rules
+# Rules (iptables arguments, one per line) come from stdin. The new chain is
+# fully populated and jumped to (once per match; no match = unconditional)
+# before the old chain is retired, so the parent is never without it.
+install_chain() {
+  local t="$1" parent="$2" c="$3" new="$3-NEW" rule m
+  shift 3
+  [ "$#" -gt 0 ] || set -- ""
+  drop_chain "$t" "$parent" "$new"
+  iptables -t "$t" -N "$new"
+  while read -r rule; do
+    # shellcheck disable=SC2086 # word splitting of the rule is intended
+    iptables -t "$t" -A "$new" $rule
+  done
+  for m in "$@"; do
+    # shellcheck disable=SC2086
+    iptables -t "$t" -I "$parent" $m -j "$new"
+  done
+  drop_chain "$t" "$parent" "$c"
+  iptables -t "$t" -E "$new" "$c"
+}
+
+# Docker creates DOCKER-USER and jumps to it from FORWARD, but at boot we run
+# before Docker. Docker reuses an existing DOCKER-USER chain and its rules.
+ensure_docker_user() {
+  iptables -t filter -L DOCKER-USER -n >/dev/null 2>&1 || iptables -t filter -N DOCKER-USER
+  iptables -t filter -C FORWARD -j DOCKER-USER 2>/dev/null \
+    || iptables -t filter -I FORWARD -j DOCKER-USER
+}
+
+# ip6tables may be absent; IPv6 forwarding is also off via sysctl.
+ip6_drop() {
+  local br
+  for br in $BRIDGES; do
+    ip6tables -C FORWARD -i "$br" -j DROP 2>/dev/null \
+      || ip6tables -I FORWARD -i "$br" -j DROP 2>/dev/null || true
+  done
+}
+
+ip6_undrop() {
+  local br
+  for br in $BRIDGES; do
+    ip6tables -D FORWARD -i "$br" -j DROP 2>/dev/null || true
+  done
+}
+
+fwd_rules() {
+  local br
+  for br in $BRIDGES; do
+    echo "-i $br -o $PUBLIC_IFACE -m mark --mark $DIRECT_MARK -j RETURN"
+    echo "-i $br -o $PUBLIC_IFACE -p udp --sport $ENTRY_AWG_PORT -j RETURN"
+  done
+  for br in $BRIDGES; do
+    echo "-i $br -o $PUBLIC_IFACE -j DROP"
+  done
+}
+
+# rule_selectors <pref>: the ip rule selectors wanted at that priority.
+rule_selectors() {
+  local br
+  case "$1" in
+    10100) echo "fwmark $DIRECT_MARK lookup main" ;;
+    10110) for br in $BRIDGES; do echo "iif $br ipproto udp sport $ENTRY_AWG_PORT lookup main"; done ;;
+    10120) for br in $BRIDGES; do echo "iif $br lookup main suppress_prefixlength 0"; done ;;
+    10130) for br in $BRIDGES; do echo "iif $br lookup $TABLE"; done ;;
+  esac
+}
+
+del_pref() {
+  while ip rule del pref "$1" 2>/dev/null; do :; done
+}
+
+add_rules() { # <pref> < selectors
+  local sel
+  while read -r sel; do
+    # shellcheck disable=SC2086
+    ip rule add pref "$1" $sel
+  done
+}
+
+# Each priority p is swapped through staging priority p+1 (still below the
+# next level): add the wanted rules at p+1, clear p, add them at p, clear
+# p+1. Stale rules (old port, removed bridge) disappear with the clear, and
+# at every step each bridge keeps a rule of the same meaning.
+install_rules() {
+  local p s
+  for p in $RULE_PREFS; do
+    s=$((p + 1))
+    del_pref "$s"
+    rule_selectors "$p" | add_rules "$s"
+    del_pref "$p"
+    rule_selectors "$p" | add_rules "$p"
+    del_pref "$s"
+  done
+}
+
+up() {
+  if [ "$(cat "$RT_TABLES_DIR/$TABLE_NAME.conf" 2>/dev/null)" != "$TABLE $TABLE_NAME" ]; then
+    mkdir -p "$RT_TABLES_DIR"
+    echo "$TABLE $TABLE_NAME" > "$RT_TABLES_DIR/$TABLE_NAME.conf"
+  fi
+  ipset create "$DIRECT_SET" hash:net -exist
+  ipset create "$FORCE_EXIT_SET" hash:net -exist
+
+  # 1. Fail-closed backstop first.
+  ensure_docker_user
+  fwd_rules | install_chain filter DOCKER-USER MULTIHOP-FWD
+  ip6_drop
+
+  # 2. Direct marking (one PREROUTING jump per bridge), NAT and MSS clamp.
+  local br jumps=()
+  for br in $BRIDGES; do jumps+=("-i $br"); done
+  install_chain mangle PREROUTING MULTIHOP-MARK "${jumps[@]}" <<RULES
+-m set --match-set $FORCE_EXIT_SET dst -j RETURN
+-m set --match-set $DIRECT_SET dst -j MARK --set-mark $DIRECT_MARK
+RULES
+  install_chain nat POSTROUTING MULTIHOP-NAT <<RULES
+-o $UPLINK_IFACE -j MASQUERADE
+RULES
+  install_chain mangle FORWARD MULTIHOP-MSS <<RULES
+-o $UPLINK_IFACE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+RULES
+
+  # 3. Blackhole before any rule points at the table (an empty table would
+  #    fall through to main), then the rules.
+  ip route replace blackhole default metric 4096 table "$TABLE"
+  install_rules
+}
+
+# Removes everything. Bridge traffic then follows the main table: stop
+# amnezia-awg2 first. The systemd unit deliberately never calls this.
+down() {
+  local p
+  for p in $RULE_PREFS; do
+    del_pref "$p"
+    del_pref $((p + 1))
+  done
+  ip route del blackhole default metric 4096 table "$TABLE" 2>/dev/null || true
+  local spec
+  for spec in "mangle PREROUTING MULTIHOP-MARK" "nat POSTROUTING MULTIHOP-NAT" \
+              "mangle FORWARD MULTIHOP-MSS" "filter DOCKER-USER MULTIHOP-FWD"; do
+    # shellcheck disable=SC2086
+    set -- $spec
+    drop_chain "$1" "$2" "$3-NEW"
+    drop_chain "$1" "$2" "$3"
+  done
+  ip6_undrop
+}
+
+case "${1:-}" in
+  up) up ;;
+  down) down ;;
+  *) echo "usage: ${0##*/} up|down" >&2; exit 2 ;;
+esac

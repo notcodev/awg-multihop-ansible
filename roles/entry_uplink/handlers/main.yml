@@ -1,0 +1,14 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Reload multihop-net
+  ansible.builtin.systemd_service:
+    name: multihop-net
+    state: reloaded
+
+- name: Restart multihop-uplink
+  community.docker.docker_container:
+    name: multihop-uplink
+    restart: true

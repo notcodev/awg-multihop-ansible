@@ -1,0 +1,17 @@
+[Unit]
+Description=Multihop entry policy routing and fail-closed firewall
+# Must be in place before Docker starts and restarts amnezia-awg2 (restart:
+# always), or user traffic would follow the main table out of the entry IP.
+# Needs nothing from Docker: the script creates DOCKER-USER itself.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/multihop-entry-net up
+ExecReload=/usr/local/sbin/multihop-entry-net up
+# No ExecStop: stopping the unit must never remove the fail-closed rules while
+# amnezia-awg2 may still be forwarding. `multihop-entry-net down` is manual.
+
+[Install]
+WantedBy=multi-user.target

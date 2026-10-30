@@ -114,3 +114,94 @@ def test_start_sh_substitutes_subnet():
     assert "-s 10.8.1.0/24 -o eth1 -j MASQUERADE" in text
     assert "$AWG_SUBNET_IP" not in text
     assert "$WIREGUARD_SUBNET_CIDR" not in text
+
+
+def test_uplink_conf():
+    fx = _fixture()
+    text = render("roles/entry_uplink/templates/awg-uplink.conf.j2", "awg-uplink.conf")
+    link, uplink = fx["vault_link_awg"], fx["vault_uplink_entry"]
+    iface, peer = text.split("[Peer]")
+    assert text.count("[Peer]") == 1 and iface.lstrip().startswith("[Interface]")
+    assert f"PrivateKey = {uplink['private_key']}" in iface
+    assert "Address = 10.9.0.2/30" in iface
+    assert "Table = off" in iface
+    assert "MTU = 1280" in iface
+    assert "PostUp = ip route replace default dev %i table 51820 metric 1" in iface
+    assert "ListenPort" not in text
+    assert "Jc = 6" in iface
+    assert f"\nI1 = {link['params']['i1']}\n" in iface
+    assert "# I1" not in text
+    assert f"PublicKey = {link['exit_public_key']}" in peer
+    assert f"PresharedKey = {link['psk']}" in peer
+    assert "AllowedIPs = 0.0.0.0/0" in peer
+    assert f"Endpoint = exit.example.com:{fx['exit_awg_port']}" in peer
+    assert "PersistentKeepalive = 25" in peer
+
+
+def test_uplink_conf_other_subnet():
+    text = render("roles/entry_uplink/templates/awg-uplink.conf.j2", "awg-uplink.conf",
+                  {"uplink_subnet": "192.168.7.4/30", "uplink_mtu": 1360})
+    assert "Address = 192.168.7.6/30" in text
+    assert "MTU = 1360" in text
+
+
+def _unit(text: str) -> dict:
+    """Parse a systemd unit into {section: [(key, value), ...]}."""
+    out, sec = {}, None
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if ln.startswith("["):
+            sec = ln.strip("[]")
+            out.setdefault(sec, [])
+        else:
+            k, v = ln.split("=", 1)
+            out[sec].append((k, v))
+    return out
+
+
+def _vals(unit: dict, sec: str, key: str) -> list:
+    return [w for k, v in unit.get(sec, []) if k == key for w in v.split()]
+
+
+def test_entry_net_unit_runs_before_docker():
+    """Review Focus 2: rules exist before Docker restarts amnezia-awg2."""
+    u = _unit(render("roles/entry_uplink/templates/multihop-net.service.j2",
+                     "multihop-net.service"))
+    assert "docker.service" in _vals(u, "Unit", "Before")
+    assert "docker.service" not in _vals(u, "Unit", "After")
+    for key in ("PartOf", "Requires", "BindsTo", "Wants"):
+        assert "docker.service" not in _vals(u, "Unit", key)
+    assert _vals(u, "Service", "Type") == ["oneshot"]
+    assert _vals(u, "Service", "RemainAfterExit") == ["yes"]
+    assert _vals(u, "Service", "ExecStart") == ["/usr/local/sbin/multihop-entry-net", "up"]
+    assert _vals(u, "Service", "ExecReload") == ["/usr/local/sbin/multihop-entry-net", "up"]
+    # stopping the unit must never tear down the fail-closed rules
+    assert _vals(u, "Service", "ExecStop") == []
+    assert _vals(u, "Install", "WantedBy") == ["multi-user.target"]
+
+
+def test_docker_dropin_pulls_in_entry_net():
+    u = _unit((ROOT / "roles/entry_uplink/files/docker-multihop.conf").read_text())
+    assert "multihop-net.service" in _vals(u, "Unit", "Wants")
+    assert "multihop-net.service" in _vals(u, "Unit", "After")
+
+
+def test_reresolve_timer_every_minute():
+    u = _unit(render("roles/entry_uplink/templates/multihop-reresolve.timer.j2",
+                     "multihop-reresolve.timer"))
+    assert _vals(u, "Timer", "OnUnitActiveSec") == ["1min"]
+    assert _vals(u, "Timer", "OnBootSec")
+    assert _vals(u, "Install", "WantedBy") == ["timers.target"]
+    s = _unit(render("roles/entry_uplink/templates/multihop-reresolve.service.j2",
+                     "multihop-reresolve.service"))
+    assert _vals(s, "Service", "Type") == ["oneshot"]
+    assert _vals(s, "Service", "ExecStart") == ["/usr/local/sbin/multihop-reresolve"]
+
+
+def test_uplink_start_sh():
+    text = render("roles/entry_uplink/templates/uplink-start.sh.j2", "uplink-start.sh")
+    assert "CONF=/etc/amnezia/awg-uplink.conf" in text
+    assert "trap down TERM INT" in text
+    assert 'awg-quick up "$CONF"' in text

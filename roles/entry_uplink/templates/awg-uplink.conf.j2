@@ -1,0 +1,21 @@
+{#- Uplink subnet: exit is host .1, entry is host .2 -#}
+{%- set _base = (uplink_subnet | split('/'))[0].split('.') -%}
+{%- set _prefix = (uplink_subnet | split('/'))[1] -%}
+{%- set _net = _base[:3] | join('.') -%}
+{%- set _host = _base[3] | int -%}
+[Interface]
+PrivateKey = {{ vault_uplink_entry.private_key }}
+Address = {{ _net }}.{{ _host + 2 }}/{{ _prefix }}
+Table = off
+MTU = {{ uplink_mtu }}
+PostUp = ip route replace default dev %i table 51820 metric 1
+{% for line in vault_link_awg.params | awg_params_lines(false) %}
+{{ line }}
+{% endfor %}
+
+[Peer]
+PublicKey = {{ vault_link_awg.exit_public_key }}
+PresharedKey = {{ vault_link_awg.psk }}
+AllowedIPs = 0.0.0.0/0
+Endpoint = {{ exit_domain }}:{{ exit_awg_port }}
+PersistentKeepalive = 25

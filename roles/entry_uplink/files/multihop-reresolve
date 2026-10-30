@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Re-resolve EXIT_DOMAIN and repoint the uplink peer when the address changed.
+# A failed, empty or malformed resolution never touches the current endpoint.
+set -euo pipefail
+
+MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
+# shellcheck disable=SC1090
+. "$MULTIHOP_ENV"
+
+: "${EXIT_DOMAIN:?EXIT_DOMAIN not set in $MULTIHOP_ENV}"
+: "${EXIT_PORT:?EXIT_PORT not set in $MULTIHOP_ENV}"
+: "${EXIT_PUBKEY:?EXIT_PUBKEY not set in $MULTIHOP_ENV}"
+CONTAINER=multihop-uplink
+IFACE=awg-uplink
+
+log() { echo "${0##*/}: $*" >&2; }
+
+addr=$(getent ahostsv4 "$EXIT_DOMAIN" | awk 'NR==1{print $1}') || addr=""
+if ! [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  log "cannot resolve $EXIT_DOMAIN (got '${addr}'), keeping current endpoint"
+  exit 0
+fi
+want="$addr:$EXIT_PORT"
+
+cur=$(docker exec "$CONTAINER" awg show "$IFACE" endpoints \
+  | awk -v k="$EXIT_PUBKEY" '$1 == k {print $2}')
+[ "$cur" = "$want" ] && exit 0
+
+log "exit endpoint ${cur:-(none)} -> $want"
+docker exec "$CONTAINER" awg set "$IFACE" peer "$EXIT_PUBKEY" endpoint "$want"

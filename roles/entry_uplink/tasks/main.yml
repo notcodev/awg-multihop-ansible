@@ -1,0 +1,136 @@
+---
+# Own marker so the common block in multihop.env survives re-runs.
+- name: Write uplink keys to multihop.env
+  ansible.builtin.blockinfile:
+    path: /etc/multihop/multihop.env
+    create: true
+    mode: "0644"
+    owner: root
+    group: root
+    marker: "# {mark} ANSIBLE MANAGED BLOCK uplink"
+    block: |
+      ENTRY_AWG_PORT={{ entry_awg_port }}
+      BRIDGES="{{ entry_uplink_bridges | join(' ') }}"
+      EXIT_DOMAIN={{ exit_domain }}
+      EXIT_PORT={{ exit_awg_port }}
+      EXIT_PUBKEY={{ vault_link_awg.exit_public_key }}
+  notify: Reload multihop-net
+
+- name: Install multihop scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/sbin/{{ item }}"
+    mode: "0755"
+    owner: root
+    group: root
+  loop:
+    - multihop-entry-net
+    - multihop-reresolve
+  notify: Reload multihop-net
+
+- name: Install multihop-net unit
+  ansible.builtin.template:
+    src: multihop-net.service.j2
+    dest: /etc/systemd/system/multihop-net.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify:
+    - Reload systemd
+    - Reload multihop-net
+
+- name: Create docker.service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+# Docker pulls in multihop-net and starts after it, so a Docker restart or a
+# reboot never runs amnezia-awg2 without the routing and firewall rules.
+- name: Order docker.service after multihop-net
+  ansible.builtin.copy:
+    src: docker-multihop.conf
+    dest: /etc/systemd/system/docker.service.d/multihop.conf
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Install re-resolve units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+    owner: root
+    group: root
+  loop:
+    - multihop-reresolve.service
+    - multihop-reresolve.timer
+  notify: Reload systemd
+
+- name: Create uplink state directory
+  ansible.builtin.file:
+    path: "{{ entry_uplink_state_dir }}"
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: Write awg-uplink.conf
+  ansible.builtin.template:
+    src: awg-uplink.conf.j2
+    dest: "{{ entry_uplink_state_dir }}/awg-uplink.conf"
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  notify: Restart multihop-uplink
+
+- name: Write uplink-start.sh
+  ansible.builtin.template:
+    src: uplink-start.sh.j2
+    dest: "{{ entry_uplink_state_dir }}/uplink-start.sh"
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Restart multihop-uplink
+
+- name: Reload systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Rules first, then the container that adds the uplink route. Handlers
+# (container restart included) run at the end of the play.
+- name: Enable and start multihop-net
+  ansible.builtin.systemd_service:
+    name: multihop-net
+    enabled: true
+    state: started
+
+- name: Run multihop-uplink container
+  community.docker.docker_container:
+    name: multihop-uplink
+    image: "{{ entry_uplink_image }}"
+    state: started
+    restart_policy: always
+    network_mode: host
+    capabilities:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun:rwm
+    entrypoint:
+      - bash
+      - /opt/multihop/uplink-start.sh
+    env:
+      WG_QUICK_USERSPACE_IMPLEMENTATION: amneziawg-go
+    volumes:
+      - "{{ entry_uplink_state_dir }}/awg-uplink.conf:/etc/amnezia/awg-uplink.conf:ro"
+      - "{{ entry_uplink_state_dir }}/uplink-start.sh:/opt/multihop/uplink-start.sh:ro"
+
+- name: Enable and start re-resolve timer
+  ansible.builtin.systemd_service:
+    name: multihop-reresolve.timer
+    enabled: true
+    state: started

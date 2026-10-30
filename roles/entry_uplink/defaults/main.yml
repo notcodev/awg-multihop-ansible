@@ -1,0 +1,8 @@
+---
+entry_uplink_image: multihop/awg-base:pinned
+entry_uplink_state_dir: /var/lib/multihop/uplink
+# Bridges the app container's user traffic arrives from: the default bridge
+# and the amnezia-dns-net bridge (entry_app_network_bridge).
+entry_uplink_bridges:
+  - docker0
+  - amn0

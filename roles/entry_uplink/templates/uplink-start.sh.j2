@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Container entrypoint: bring awg-uplink up, tear it down on TERM/INT.
+# Routing and firewall live on the host (multihop-entry-net); the only host
+# change made from here is the PostUp default route into table 51820, which
+# disappears with the interface.
+set -u
+
+CONF=/etc/amnezia/awg-uplink.conf
+
+down() {
+  awg-quick down "$CONF" || true
+  exit 0
+}
+trap down TERM INT
+
+awg-quick up "$CONF" || exit 1
+
+sleep infinity &
+wait $!
