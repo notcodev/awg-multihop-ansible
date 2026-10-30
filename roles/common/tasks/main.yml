@@ -1,0 +1,93 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable and start docker
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Set sysctls
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-multihop.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { key: net.ipv4.ip_forward, value: "1" }
+    - { key: net.ipv4.conf.all.src_valid_mark, value: "1" }
+    - { key: net.ipv6.conf.all.forwarding, value: "0" }
+
+- name: Pull pinned base image by digest
+  community.docker.docker_image:
+    name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
+    source: pull
+
+- name: Tag base image locally
+  community.docker.docker_image_tag:
+    name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
+    repository: "{{ common_base_image_tag }}"
+
+- name: Create multihop config directory
+  ansible.builtin.file:
+    path: /etc/multihop
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Create multihop state directory
+  ansible.builtin.file:
+    path: /var/lib/multihop
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+# Own marker so blocks appended by later roles survive re-runs.
+- name: Write common keys to multihop.env
+  ansible.builtin.blockinfile:
+    path: /etc/multihop/multihop.env
+    create: true
+    mode: "0644"
+    owner: root
+    group: root
+    marker: "# {mark} ANSIBLE MANAGED BLOCK common"
+    block: "{{ lookup('ansible.builtin.template', 'multihop.env.j2') }}"
+  notify: Restart multihop-input-fw
+
+- name: Install multihop-input-fw
+  ansible.builtin.copy:
+    src: multihop-input-fw
+    dest: /usr/local/sbin/multihop-input-fw
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Restart multihop-input-fw
+
+- name: Install multihop-input-fw unit
+  ansible.builtin.template:
+    src: multihop-input-fw.service.j2
+    dest: /etc/systemd/system/multihop-input-fw.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify:
+    - Reload systemd
+    - Restart multihop-input-fw
+
+- name: Flush handlers before enabling firewall
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start multihop-input-fw
+  ansible.builtin.systemd_service:
+    name: multihop-input-fw
+    enabled: true
+    state: started

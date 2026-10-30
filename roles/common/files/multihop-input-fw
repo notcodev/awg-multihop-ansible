@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Manage the MULTIHOP-IN INPUT chain: allow loopback, established, SSH and
+# configured ports; drop all other inbound traffic on PUBLIC_IFACE.
+set -euo pipefail
+
+MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
+# shellcheck disable=SC1090
+. "$MULTIHOP_ENV"
+
+CHAIN=MULTIHOP-IN
+: "${PUBLIC_IFACE:?PUBLIC_IFACE not set in $MULTIHOP_ENV}"
+: "${SSH_PORT:=22}"
+: "${INPUT_UDP_PORTS:=}"
+: "${INPUT_TCP_PORTS:=}"
+
+up() {
+  iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
+  iptables -A "$CHAIN" -i lo -j ACCEPT
+  iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A "$CHAIN" -p tcp --dport "$SSH_PORT" -j ACCEPT
+  local p
+  for p in $INPUT_UDP_PORTS; do
+    iptables -A "$CHAIN" -p udp --dport "$p" -j ACCEPT
+  done
+  for p in $INPUT_TCP_PORTS; do
+    iptables -A "$CHAIN" -p tcp --dport "$p" -j ACCEPT
+  done
+  iptables -A "$CHAIN" -i "$PUBLIC_IFACE" -j DROP
+  iptables -C INPUT -j "$CHAIN" 2>/dev/null || iptables -I INPUT -j "$CHAIN"
+}
+
+down() {
+  while iptables -C INPUT -j "$CHAIN" 2>/dev/null; do
+    iptables -D INPUT -j "$CHAIN"
+  done
+  iptables -F "$CHAIN" 2>/dev/null || true
+  iptables -X "$CHAIN" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  up) up ;;
+  down) down ;;
+  *) echo "usage: ${0##*/} up|down" >&2; exit 2 ;;
+esac
