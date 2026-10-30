@@ -51,3 +51,71 @@ def test_seed_tasks_keep_app_state(tmp_path):
     out = _run(playbook, state)
     assert {p.name: p.read_bytes() for p in state.iterdir()} == snapshot
     assert "changed=0" in out
+
+
+RESTORE_PLAYBOOK = """---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - {fixture}
+  tasks:
+    - ansible.builtin.include_role:
+        name: entry_app
+        tasks_from: restore
+"""
+
+
+def _restore(tmp_path, archive, state):
+    playbook = tmp_path / "restore.yml"
+    playbook.write_text(RESTORE_PLAYBOOK.format(fixture=RENDER_DIR / "fixture_vars.yml"))
+    env = dict(os.environ)
+    if not (ROOT / ".vault-pass").exists():
+        env.setdefault("ANSIBLE_VAULT_PASSWORD_FILE", str(FIXTURE_VAULT_PASS))
+    env["ANSIBLE_CONFIG"] = str(ROOT / "ansible.cfg")
+    return subprocess.run(
+        ["ansible-playbook", "-i", "localhost,", "-e", "ansible_connection=local",
+         "-e", f"entry_state_dir={state}", "-e", f"entry_restore_archive={archive}",
+         "-e", "entry_app_manage_container=false", str(playbook)],
+        cwd=ROOT, env=env, capture_output=True, text=True,
+    )
+
+
+def _make_tar(tmp_path, name, members):
+    src = tmp_path / f"{name}-src"
+    for rel, data in members.items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(data)
+    archive = tmp_path / f"{name}.tar"
+    subprocess.run(["tar", "-cf", str(archive), "-C", str(src), "."], check=True)
+    return archive
+
+
+def test_restore_replaces_state(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "awg0.conf").write_text("old\n")
+    (state / "stale").write_text("x")
+    archive = _make_tar(tmp_path, "good", {
+        "awg0.conf": "restored\n", "wireguard_server_private_key.key": "K\n",
+        "clientsTable": "[]\n"})
+    proc = _restore(tmp_path, archive, state)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert sorted(p.name for p in state.iterdir()) == [
+        "awg0.conf", "clientsTable", "wireguard_server_private_key.key"]
+    assert (state / "awg0.conf").read_text() == "restored\n"
+    assert not (tmp_path / "state.restore-staging").exists()
+
+
+def test_restore_rejects_nested_archive_and_keeps_state(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "awg0.conf").write_text("live\n")
+    (state / "clientsTable").write_text("users\n")
+    archive = _make_tar(tmp_path, "nested", {
+        "entry-awg/awg0.conf": "x\n", "entry-awg/wireguard_server_private_key.key": "K\n"})
+    proc = _restore(tmp_path, archive, state)
+    assert proc.returncode != 0
+    assert "does not contain awg0.conf" in proc.stdout + proc.stderr
+    assert (state / "awg0.conf").read_text() == "live\n"
+    assert (state / "clientsTable").read_text() == "users\n"

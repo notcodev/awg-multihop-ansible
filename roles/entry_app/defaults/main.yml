@@ -8,3 +8,5 @@ entry_app_network_bridge: amn0
 # Set by playbooks/restore.yml: controller-local path to a decrypted tar of
 # the state directory (contents at the archive root, e.g. ./awg0.conf).
 entry_restore_archive: ""  # noqa: var-naming[no-role-prefix]
+entry_app_manage_container: true
+entry_app_staging_dir: "{{ entry_state_dir }}.restore-staging"

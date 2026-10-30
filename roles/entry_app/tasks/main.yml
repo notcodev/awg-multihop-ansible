@@ -85,18 +85,35 @@
     src: Dockerfile
     dest: "{{ entry_app_build_dir }}/Dockerfile"
     mode: "0644"
+  register: entry_app_stage_dockerfile
 
 - name: Stage start.sh
   ansible.builtin.template:
     src: start.sh.j2
     dest: "{{ entry_app_build_dir }}/start.sh"
     mode: "0755"
+  register: entry_app_stage_start
+
+- name: Inspect the pinned base image
+  community.docker.docker_image_info:
+    name: multihop/awg-base:pinned
+  register: entry_app_base_info
+
+# A retagged base image changes this marker and forces a rebuild.
+- name: Record base image id
+  ansible.builtin.copy:
+    content: "{{ (entry_app_base_info.images | map(attribute='Id') | first | default('')) }}\n"
+    dest: "{{ entry_app_build_dir }}/base.id"
+    mode: "0644"
+  register: entry_app_stage_base
 
 - name: Build the app image
   community.docker.docker_image:
     name: "{{ entry_app_container }}"
     source: build
-    force_source: true
+    force_source: >-
+      {{ entry_app_stage_dockerfile.changed or entry_app_stage_start.changed
+         or entry_app_stage_base.changed }}
     build:
       path: "{{ entry_app_build_dir }}"
       pull: false

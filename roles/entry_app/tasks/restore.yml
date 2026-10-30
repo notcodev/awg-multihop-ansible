@@ -13,16 +13,57 @@
     that: entry_app_archive_stat.stat.exists
     fail_msg: "entry_restore_archive {{ entry_restore_archive }} does not exist on the controller"
 
+# Extract into a staging directory first and validate it; the live state
+# directory and container are untouched unless the archive is sane.
+- name: Reset staging directory
+  ansible.builtin.file:
+    path: "{{ entry_app_staging_dir }}"
+    state: "{{ item }}"
+    mode: "0700"
+  loop: [absent, directory]
+
+- name: Upload the archive
+  ansible.builtin.copy:
+    src: "{{ entry_restore_archive }}"
+    dest: "{{ entry_app_staging_dir }}.tar"
+    mode: "0600"
+  no_log: true
+
+# tar instead of unarchive: unarchive requires GNU tar (absent on macOS test hosts).
+- name: Extract the backup into staging  # noqa: command-instead-of-module
+  ansible.builtin.command: tar -xf "{{ entry_app_staging_dir }}.tar" -C "{{ entry_app_staging_dir }}"
+  changed_when: true
+
+- name: Remove uploaded archive
+  ansible.builtin.file:
+    path: "{{ entry_app_staging_dir }}.tar"
+    state: absent
+
+- name: Check required files at the staging root
+  ansible.builtin.stat:
+    path: "{{ entry_app_staging_dir }}/{{ item }}"
+  loop: [awg0.conf, wireguard_server_private_key.key]
+  register: entry_app_staged
+
+- name: Fail if the archive does not hold the state at its root
+  ansible.builtin.assert:
+    that: entry_app_staged.results | map(attribute='stat.exists') | list | min
+    fail_msg: >-
+      The restore archive does not contain awg0.conf and
+      wireguard_server_private_key.key at its root (a top-level directory or a
+      corrupt archive?). Nothing was changed.
+
 - name: Look up the app container
   community.docker.docker_container_info:
     name: "{{ entry_app_container }}"
   register: entry_app_restore_info
+  when: entry_app_manage_container | bool
 
 - name: Stop the app container
   community.docker.docker_container:
     name: "{{ entry_app_container }}"
     state: stopped
-  when: entry_app_restore_info.exists
+  when: entry_app_restore_info.exists | default(false)
 
 - name: Create state directory
   ansible.builtin.file:
@@ -45,18 +86,19 @@
   loop_control:
     label: "{{ item.path | basename }}"
 
-- name: Extract the backup into the state directory
-  ansible.builtin.unarchive:
-    src: "{{ entry_restore_archive }}"
-    dest: "{{ entry_state_dir }}"
-    mode: "u=rwX,go="
-  no_log: true
+- name: Move staged files into the state directory
+  ansible.builtin.command: cp -a "{{ entry_app_staging_dir }}/." "{{ entry_state_dir }}/"
+  changed_when: true
+
+- name: Remove staging directory
+  ansible.builtin.file:
+    path: "{{ entry_app_staging_dir }}"
+    state: absent
 
 - name: Read restored server private key
   ansible.builtin.slurp:
     src: "{{ entry_state_dir }}/wireguard_server_private_key.key"
   register: entry_app_restored_key
-  failed_when: false
   no_log: true
 
 - name: Warn when the backup differs from the vault
@@ -65,11 +107,10 @@
       The restored server private key differs from vault_entry_awg.private_key.
       The backup wins; update the vault if it should match.
   when:
-    - entry_app_restored_key.content is defined
     - (entry_app_restored_key.content | b64decode | trim) != vault_entry_awg.private_key
 
 - name: Start the app container again
   community.docker.docker_container:
     name: "{{ entry_app_container }}"
     state: started
-  when: entry_app_restore_info.exists
+  when: entry_app_restore_info.exists | default(false)
