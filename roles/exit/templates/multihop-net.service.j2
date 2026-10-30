@@ -1,0 +1,15 @@
+[Unit]
+Description=Multihop exit forwarding, NAT and MSS clamp
+After=docker.service multihop-input-fw.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/multihop-exit-net up
+ExecReload=/usr/local/sbin/multihop-exit-net up
+ExecStop=/usr/local/sbin/multihop-exit-net down
+
+[Install]
+WantedBy=multi-user.target

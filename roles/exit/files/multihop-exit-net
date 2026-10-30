@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Exit-server host networking for the awg-exit interface: forward accept,
+# MASQUERADE of the uplink subnet and MSS clamping. Every ruleset lives in its
+# own chain that is rebuilt and swapped in atomically, so re-applying never
+# leaves forwarding rules missing mid-update.
+set -euo pipefail
+
+MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
+# shellcheck disable=SC1090
+. "$MULTIHOP_ENV"
+
+: "${PUBLIC_IFACE:?PUBLIC_IFACE not set in $MULTIHOP_ENV}"
+: "${UPLINK_SUBNET:?UPLINK_SUBNET not set in $MULTIHOP_ENV}"
+EXIT_IFACE=awg-exit
+
+# drop_chain <table> <parent> <chain>: remove every jump to the chain from the
+# parent, then flush and delete it (if present).
+drop_chain() {
+  local t="$1" parent="$2" c="$3"
+  while iptables -t "$t" -C "$parent" -j "$c" 2>/dev/null; do
+    iptables -t "$t" -D "$parent" -j "$c"
+  done
+  if iptables -t "$t" -F "$c" 2>/dev/null; then
+    iptables -t "$t" -X "$c" 2>/dev/null || true
+  fi
+}
+
+# install_chain <table> <parent> <chain> < rules
+# Rules (iptables arguments, one rule per line) are read from stdin. The new
+# chain is fully populated and jumped to before the old one is retired.
+install_chain() {
+  local t="$1" parent="$2" c="$3" new="$3-NEW" rule
+  drop_chain "$t" "$parent" "$new"
+  iptables -t "$t" -N "$new"
+  while read -r rule; do
+    # shellcheck disable=SC2086 # word splitting of the rule is intended
+    iptables -t "$t" -A "$new" $rule
+  done
+  iptables -t "$t" -I "$parent" -j "$new"
+  drop_chain "$t" "$parent" "$c"
+  iptables -t "$t" -E "$new" "$c"
+}
+
+up() {
+  install_chain filter DOCKER-USER MULTIHOP-FWD <<RULES
+-i $EXIT_IFACE -o $PUBLIC_IFACE -j ACCEPT
+-i $PUBLIC_IFACE -o $EXIT_IFACE -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-i $EXIT_IFACE -j DROP
+RULES
+  install_chain nat POSTROUTING MULTIHOP-NAT <<RULES
+-s $UPLINK_SUBNET -o $PUBLIC_IFACE -j MASQUERADE
+RULES
+  install_chain mangle FORWARD MULTIHOP-MSS <<RULES
+-i $EXIT_IFACE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+-o $EXIT_IFACE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+RULES
+}
+
+down() {
+  drop_chain filter DOCKER-USER MULTIHOP-FWD
+  drop_chain filter DOCKER-USER MULTIHOP-FWD-NEW
+  drop_chain nat POSTROUTING MULTIHOP-NAT
+  drop_chain nat POSTROUTING MULTIHOP-NAT-NEW
+  drop_chain mangle FORWARD MULTIHOP-MSS
+  drop_chain mangle FORWARD MULTIHOP-MSS-NEW
+}
+
+case "${1:-}" in
+  up) up ;;
+  down) down ;;
+  *) echo "usage: ${0##*/} up|down" >&2; exit 2 ;;
+esac

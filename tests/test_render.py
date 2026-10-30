@@ -49,3 +49,35 @@ def test_input_udp_ports_from_common_input_udp_ports():
     text = render("roles/common/templates/multihop.env.j2", "multihop.env",
                   {"common_input_udp_ports": [51820, 51821]})
     assert 'INPUT_UDP_PORTS="51820 51821"' in text
+
+
+def _fixture():
+    import yaml
+    return yaml.safe_load((RENDER_DIR / "fixture_vars.yml").read_text())
+
+
+def test_exit_conf():
+    fx = _fixture()
+    text = render("roles/exit/templates/awg-exit.conf.j2", "awg-exit.conf")
+    link, uplink = fx["vault_link_awg"], fx["vault_uplink_entry"]
+    iface, peer = text.split("[Peer]")
+    assert text.count("[Peer]") == 1 and iface.lstrip().startswith("[Interface]")
+    assert f"PrivateKey = {link['exit_private_key']}" in iface
+    assert "Address = 10.9.0.1/30" in iface
+    assert f"ListenPort = {fx['exit_awg_port']}" in iface
+    assert "Table = off" in iface
+    assert "MTU = 1280" in iface
+    assert "Jc = 6" in iface
+    assert f"# I1 = {link['params']['i1']}" in iface
+    assert not any(ln.startswith("I1") for ln in text.splitlines())
+    assert f"PublicKey = {uplink['public_key']}" in peer
+    assert f"PresharedKey = {link['psk']}" in peer
+    assert "AllowedIPs = 10.9.0.2/32" in peer
+    assert "Endpoint" not in text
+
+
+def test_exit_conf_other_subnet():
+    text = render("roles/exit/templates/awg-exit.conf.j2", "awg-exit.conf",
+                  {"uplink_subnet": "192.168.7.4/30"})
+    assert "Address = 192.168.7.5/30" in text
+    assert "AllowedIPs = 192.168.7.6/32" in text

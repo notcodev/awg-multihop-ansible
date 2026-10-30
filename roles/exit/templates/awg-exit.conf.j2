@@ -1,0 +1,19 @@
+{#- Uplink subnet: exit is host .1, entry is host .2 -#}
+{%- set _base = (uplink_subnet | split('/'))[0].split('.') -%}
+{%- set _prefix = (uplink_subnet | split('/'))[1] -%}
+{%- set _net = _base[:3] | join('.') -%}
+{%- set _host = _base[3] | int -%}
+[Interface]
+PrivateKey = {{ vault_link_awg.exit_private_key }}
+Address = {{ _net }}.{{ _host + 1 }}/{{ _prefix }}
+ListenPort = {{ exit_awg_port }}
+Table = off
+MTU = {{ uplink_mtu }}
+{% for line in vault_link_awg.params | awg_params_lines(true) %}
+{{ line }}
+{% endfor %}
+
+[Peer]
+PublicKey = {{ vault_uplink_entry.public_key }}
+PresharedKey = {{ vault_link_awg.psk }}
+AllowedIPs = {{ _net }}.{{ _host + 2 }}/32

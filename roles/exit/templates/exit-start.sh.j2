@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Container entrypoint: bring awg-exit up, tear it down on TERM/INT.
+# Firewall and NAT live on the host (multihop-exit-net), never in here.
+set -u
+
+CONF=/etc/amnezia/awg-exit.conf
+
+down() {
+  awg-quick down "$CONF" || true
+  exit 0
+}
+trap down TERM INT
+
+awg-quick up "$CONF" || exit 1
+
+sleep infinity &
+wait $!

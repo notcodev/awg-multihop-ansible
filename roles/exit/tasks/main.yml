@@ -1,0 +1,89 @@
+---
+# Own marker so the common block in multihop.env survives re-runs.
+- name: Write exit keys to multihop.env
+  ansible.builtin.blockinfile:
+    path: /etc/multihop/multihop.env
+    create: true
+    mode: "0644"
+    owner: root
+    group: root
+    marker: "# {mark} ANSIBLE MANAGED BLOCK exit"
+    block: |
+      UPLINK_SUBNET={{ uplink_subnet }}
+  notify: Reload multihop-net
+
+- name: Install multihop-exit-net
+  ansible.builtin.copy:
+    src: multihop-exit-net
+    dest: /usr/local/sbin/multihop-exit-net
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Reload multihop-net
+
+- name: Install multihop-net unit
+  ansible.builtin.template:
+    src: multihop-net.service.j2
+    dest: /etc/systemd/system/multihop-net.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify:
+    - Reload systemd
+    - Reload multihop-net
+
+- name: Create exit state directory
+  ansible.builtin.file:
+    path: "{{ exit_state_dir }}"
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: Write awg-exit.conf
+  ansible.builtin.template:
+    src: awg-exit.conf.j2
+    dest: "{{ exit_state_dir }}/awg-exit.conf"
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  notify: Restart multihop-exit
+
+- name: Write exit-start.sh
+  ansible.builtin.template:
+    src: exit-start.sh.j2
+    dest: "{{ exit_state_dir }}/exit-start.sh"
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Restart multihop-exit
+
+- name: Flush handlers before starting the container
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start multihop-net
+  ansible.builtin.systemd_service:
+    name: multihop-net
+    enabled: true
+    state: started
+
+- name: Run multihop-exit container
+  community.docker.docker_container:
+    name: multihop-exit
+    image: "{{ exit_image }}"
+    state: started
+    restart_policy: always
+    network_mode: host
+    capabilities:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun:rwm
+    entrypoint:
+      - bash
+      - /opt/multihop/exit-start.sh
+    env:
+      WG_QUICK_USERSPACE_IMPLEMENTATION: amneziawg-go
+    volumes:
+      - "{{ exit_state_dir }}/awg-exit.conf:/etc/amnezia/awg-exit.conf:ro"
+      - "{{ exit_state_dir }}/exit-start.sh:/opt/multihop/exit-start.sh:ro"
