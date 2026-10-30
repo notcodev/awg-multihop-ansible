@@ -42,7 +42,7 @@ A
   run_script multihop-reresolve
   [ "$status" -eq 0 ]
   grep -q -e 'awg show' "$STUB_LOG"
-  ! grep -q -e 'awg set' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
 }
 
 @test "port change alone updates endpoint" {
@@ -57,21 +57,30 @@ A
   stub getent "" 0
   run_script multihop-reresolve
   [ "$status" -eq 0 ]
-  ! grep -q -e 'awg set' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
 }
 
 @test "getent failure keeps endpoint" {
   stub getent "" 2
   run_script multihop-reresolve
   [ "$status" -eq 0 ]
-  ! grep -q -e 'awg set' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
 }
 
 @test "non-address answer keeps endpoint" {
   stub getent "<html>     STREAM exit.example.com"
   run_script multihop-reresolve
   [ "$status" -eq 0 ]
-  ! grep -q -e 'awg set' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
+}
+
+@test "exit peer missing on the interface fails without awg set" {
+  stub getent "203.0.113.9     STREAM exit.example.com"
+  stub docker "f8mW4F2meajkmhRZIr+FocB3Y+fbvFgIRJsjNKBz/R4= 198.51.100.7:27887"
+  run_script multihop-reresolve
+  [ "$status" -ne 0 ]
+  grep -q -e 'awg show' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
 }
 
 @test "uplink container down fails without awg set" {
@@ -79,5 +88,5 @@ A
   stub docker "" 1
   run_script multihop-reresolve
   [ "$status" -ne 0 ]
-  ! grep -q -e 'awg set' "$STUB_LOG"
+  ! grep -q -e 'awg set' "$STUB_LOG" || false
 }

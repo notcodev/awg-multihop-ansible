@@ -22,8 +22,13 @@ if ! [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
 fi
 want="$addr:$EXIT_PORT"
 
-cur=$(docker exec "$CONTAINER" awg show "$IFACE" endpoints \
-  | awk -v k="$EXIT_PUBKEY" '$1 == k {print $2}')
+peers=$(docker exec "$CONTAINER" awg show "$IFACE" endpoints)
+# `awg set ... peer <key>` would create a new peer; never do that.
+if ! awk -v k="$EXIT_PUBKEY" '$1 == k {f = 1} END {exit !f}' <<<"$peers"; then
+  log "peer $EXIT_PUBKEY not on $IFACE, refusing to add it"
+  exit 1
+fi
+cur=$(awk -v k="$EXIT_PUBKEY" '$1 == k {print $2}' <<<"$peers")
 [ "$cur" = "$want" ] && exit 0
 
 log "exit endpoint ${cur:-(none)} -> $want"

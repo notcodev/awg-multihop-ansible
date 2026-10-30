@@ -8,6 +8,7 @@ setup() {
   export STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
   export IPT_DIR="$BATS_TEST_TMPDIR/ipt"
   export IP_DIR="$BATS_TEST_TMPDIR/ip"
+  export IPT_GUARD="$BATS_TEST_TMPDIR/ipt_guard"
   cat > "$MULTIHOP_ENV" <<'ENV'
 PUBLIC_IFACE=eth9
 SSH_PORT=22
@@ -42,6 +43,23 @@ case "$op" in
       awk -v t="$*" '$0==t && !done {done=1; next} {print}' "$(f "$c")" > "$(f "$c").t"; mv "$(f "$c").t" "$(f "$c")" ;;
   *) exit 9 ;;
 esac
+rc=$?
+# Guard: when $IPT_GUARD lists bridges, every filter -D/-F/-X must leave
+# DOCKER-USER jumping to a chain that drops each bridge -> eth9.
+if [ "$t" = filter ] && [ -f "$IPT_GUARD" ]; then
+  case "$op" in -D|-F|-X)
+    ok=
+    for j in $(sed -n 's/^-j //p' "$d/filter.DOCKER-USER"); do
+      all=1
+      for br in $(cat "$IPT_GUARD"); do
+        grep -qxF -e "-i $br -o eth9 -j DROP" "$d/filter.$j" 2>/dev/null || all=
+      done
+      [ -n "$all" ] && ok=1
+    done
+    [ -n "$ok" ] || echo "iptables -t filter $op $* left DOCKER-USER without backstop" >> "$IPT_GUARD.violations"
+  esac
+fi
+exit $rc
 STUB
   # Fake ip. When $IP_DIR/guard lists bridges, every rule deletion checks that
   # each of them still has a rule into table 51820 (no fall-through to main).
@@ -85,8 +103,7 @@ first_line() { grep -n -m1 -e "$1" "$STUB_LOG" | cut -d: -f1; }
 expected_rules() {
   cat <<'R'
 10100 fwmark 0x5a/0xff lookup main
-10110 iif docker0 ipproto udp sport 51470 lookup main
-10110 iif amn0 ipproto udp sport 51470 lookup main
+10110 fwmark 0x5b00/0xff00 lookup main
 10120 iif docker0 lookup main suppress_prefixlength 0
 10120 iif amn0 lookup main suppress_prefixlength 0
 10130 iif docker0 lookup 51820
@@ -97,9 +114,9 @@ R
 expected_fwd() {
   cat <<'R'
 -i docker0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
--i docker0 -o eth9 -p udp --sport 51470 -j RETURN
+-i docker0 -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN
 -i amn0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
--i amn0 -o eth9 -p udp --sport 51470 -j RETURN
+-i amn0 -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN
 -i docker0 -o eth9 -j DROP
 -i amn0 -o eth9 -j DROP
 R
@@ -149,7 +166,7 @@ snapshot() {
   for br in docker0 amn0; do
     f="$IPT_DIR/filter.MULTIHOP-FWD"
     mark=$(grep -n -x -e "-i $br -o eth9 -m mark --mark 0x5a/0xff -j RETURN" "$f" | cut -d: -f1)
-    reply=$(grep -n -x -e "-i $br -o eth9 -p udp --sport 51470 -j RETURN" "$f" | cut -d: -f1)
+    reply=$(grep -n -x -e "-i $br -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN" "$f" | cut -d: -f1)
     drop=$(grep -n -x -e "-i $br -o eth9 -j DROP" "$f" | cut -d: -f1)
     [ -n "$mark" ] && [ -n "$reply" ] && [ -n "$drop" ]
     [ "$mark" -lt "$drop" ] && [ "$reply" -lt "$drop" ]
@@ -162,6 +179,7 @@ snapshot() {
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   diff "$IPT_DIR/mangle.MULTIHOP-MARK" - <<'R'
+-p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j MARK --set-mark 0x5b00/0xff00
 -m set --match-set multihop_force_exit dst -j RETURN
 -m set --match-set multihop_direct dst -j MARK --set-mark 0x5a/0xff
 R
@@ -169,11 +187,31 @@ R
 -i amn0 -j MULTIHOP-MARK
 -i docker0 -j MULTIHOP-MARK
 R
-  # both sets exist (empty if new) before the rules reference them
+  # both sets exist (empty if new) before the rules reference them, and
+  # creating them does not delay the backstop
+  fwd=$(first_line '^iptables -t filter -I DOCKER-USER -j MULTIHOP-FWD-NEW$')
   for s in multihop_direct multihop_force_exit; do
     n=$(first_line "^ipset create $s hash:net -exist\$")
     [ -n "$n" ] && [ "$n" -lt "$(first_line '^iptables -t mangle -A MULTIHOP-MARK-NEW')" ]
+    [ "$n" -gt "$fwd" ]
   done
+}
+
+@test "awg reply is identified by conntrack, not by source port" {
+  run_script multihop-entry-net up
+  [ "$status" -eq 0 ]
+  # only REPLY-direction packets of a DNAT'd flow get the reply mark
+  grep -qxF -e '-p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j MARK --set-mark 0x5b00/0xff00' \
+    "$IPT_DIR/mangle.MULTIHOP-MARK"
+  [ "$(grep -c -e '--sport' "$IPT_DIR/mangle.MULTIHOP-MARK")" -eq 1 ]
+  # routing exception keys on that mark only
+  grep -qx -e '10110 fwmark 0x5b00/0xff00 lookup main' "$IP_DIR/rules"
+  ! grep -q -e 'sport\|ipproto' "$IP_DIR/rules" || false
+  # every --sport RETURN in the backstop also requires the conntrack match
+  [ "$(grep -c -e '--sport 51470' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 2 ]
+  ! grep -e '--sport' "$IPT_DIR/filter.MULTIHOP-FWD" | grep -v -e '-m conntrack --ctstate DNAT --ctdir REPLY -j RETURN$' || false
+  # reply mark and direct mark use disjoint mask bytes
+  ! grep -q -e '0x5b00/0xff ' "$IPT_DIR/mangle.MULTIHOP-MARK" || false
 }
 
 @test "nat and mss clamp on awg-uplink" {
@@ -222,7 +260,7 @@ R
   stub ip6tables "" 0   # -C succeeds: rule present
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
-  ! grep -q -e '^ip6tables -I' "$STUB_LOG"
+  ! grep -q -e '^ip6tables -I' "$STUB_LOG" || false
 }
 
 @test "missing ip6tables is tolerated" {
@@ -236,6 +274,7 @@ R
   [ "$status" -eq 0 ]
   before=$(snapshot)
   echo "docker0 amn0" > "$IP_DIR/guard"
+  echo "docker0 amn0" > "$IPT_GUARD"
   : > "$STUB_LOG"
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
@@ -245,12 +284,14 @@ R
     add=$(first_line "^ip rule add pref $p ")
     [ -n "$del" ] && [ -n "$add" ] && [ "$del" -lt "$add" ]
   done
-  # and bridge traffic was never left without a rule into table 51820
+  # bridge traffic was never left without a rule into table 51820, and
+  # DOCKER-USER never without the bridge -> public DROP
   [ ! -f "$IP_DIR/violations" ]
+  [ ! -f "$IPT_GUARD.violations" ]
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") <(expected_rules)
   # whole state (iptables and ip) converged to exactly the same set
   [ "$(snapshot)" = "$before" ]
-  ! ls "$IPT_DIR" | grep -e '-NEW'
+  ! ls "$IPT_DIR" | grep -e '-NEW' || false
 }
 
 @test "changed port and bridges drop stale rules" {
@@ -262,17 +303,20 @@ ENTRY_AWG_PORT=40000
 BRIDGES="docker0"
 ENV
   echo "docker0" > "$IP_DIR/guard"
+  echo "docker0" > "$IPT_GUARD"
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   [ ! -f "$IP_DIR/violations" ]
+  [ ! -f "$IPT_GUARD.violations" ]
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") - <<'R'
 10100 fwmark 0x5a/0xff lookup main
-10110 iif docker0 ipproto udp sport 40000 lookup main
+10110 fwmark 0x5b00/0xff00 lookup main
 10120 iif docker0 lookup main suppress_prefixlength 0
 10130 iif docker0 lookup 51820
 R
-  ! grep -q amn0 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.PREROUTING"
-  ! grep -q 51470 "$IPT_DIR/filter.MULTIHOP-FWD"
+  ! grep -q amn0 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.PREROUTING" || false
+  ! grep -q 51470 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.MULTIHOP-MARK" || false
+  grep -q -e '--sport 40000 -m conntrack' "$IPT_DIR/filter.MULTIHOP-FWD"
 }
 
 @test "down removes rules, routes and chains" {
@@ -285,7 +329,7 @@ R
   [ ! -s "$IPT_DIR/mangle.PREROUTING" ]
   [ ! -s "$IPT_DIR/nat.POSTROUTING" ]
   [ ! -s "$IPT_DIR/mangle.FORWARD" ]
-  ! ls "$IPT_DIR" | grep -e MULTIHOP
+  ! ls "$IPT_DIR" | grep -e MULTIHOP || false
 }
 
 @test "unknown command fails" {

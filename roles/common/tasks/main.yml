@@ -24,6 +24,11 @@
     - { key: net.ipv4.ip_forward, value: "1" }
     - { key: net.ipv4.conf.all.src_valid_mark, value: "1" }
     - { key: net.ipv6.conf.all.forwarding, value: "0" }
+    # Loose reverse-path filtering: on the entry, replies arriving on
+    # awg-uplink for the app container fail a strict check (the main table
+    # routes their source via the public interface) and are dropped silently.
+    - { key: net.ipv4.conf.all.rp_filter, value: "2" }
+    - { key: net.ipv4.conf.default.rp_filter, value: "2" }
 
 - name: Create multihop config directory
   ansible.builtin.file:

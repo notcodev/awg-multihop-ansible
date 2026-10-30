@@ -3,14 +3,20 @@
 # out of the app container through the Docker bridges ($BRIDGES).
 #
 # Traffic from a bridge is routed (ip rule priorities):
-#   10100  carries the direct mark 0x5a           -> main (split routing)
-#   10110  UDP from the AWG listen port (replies)  -> main
+#   10100  carries the direct mark 0x5a/0xff      -> main (split routing)
+#   10110  carries the reply mark 0x5b00/0xff00    -> main (AWG replies)
 #   10120  anything, main minus its default route  -> main (local/bridge nets)
 #   10130  everything else                         -> table 51820
 # Table 51820 holds `default dev awg-uplink` (added by the uplink container)
 # and a blackhole default, so with the uplink down traffic is dropped.
 # MULTIHOP-FWD (from DOCKER-USER) is the backstop: bridge -> public interface
 # is dropped unless direct-marked or an AWG reply.
+#
+# An "AWG reply" is only a packet in the REPLY direction of a DNAT'd flow
+# (Docker's published ENTRY_AWG_PORT/udp), never merely "UDP with source port
+# ENTRY_AWG_PORT": a user flow can keep that source port through the app
+# container's MASQUERADE and must still go via the uplink. The reply mark has
+# its own byte (mask 0xff00), disjoint from the direct mark's (0xff).
 #
 # Ordering inside `up` is part of the guarantee: the firewall backstop and the
 # blackhole route are in place before any ip rule is touched, every iptables
@@ -32,6 +38,8 @@ UPLINK_IFACE=awg-uplink
 TABLE=51820
 TABLE_NAME=multihop
 DIRECT_MARK=0x5a/0xff
+REPLY_MARK=0x5b00/0xff00
+AWG_REPLY="-p udp --sport $ENTRY_AWG_PORT -m conntrack --ctstate DNAT --ctdir REPLY"
 DIRECT_SET=multihop_direct
 FORCE_EXIT_SET=multihop_force_exit
 RULE_PREFS="10100 10110 10120 10130"
@@ -99,7 +107,7 @@ fwd_rules() {
   local br
   for br in $BRIDGES; do
     echo "-i $br -o $PUBLIC_IFACE -m mark --mark $DIRECT_MARK -j RETURN"
-    echo "-i $br -o $PUBLIC_IFACE -p udp --sport $ENTRY_AWG_PORT -j RETURN"
+    echo "-i $br -o $PUBLIC_IFACE $AWG_REPLY -j RETURN"
   done
   for br in $BRIDGES; do
     echo "-i $br -o $PUBLIC_IFACE -j DROP"
@@ -111,7 +119,7 @@ rule_selectors() {
   local br
   case "$1" in
     10100) echo "fwmark $DIRECT_MARK lookup main" ;;
-    10110) for br in $BRIDGES; do echo "iif $br ipproto udp sport $ENTRY_AWG_PORT lookup main"; done ;;
+    10110) echo "fwmark $REPLY_MARK lookup main" ;;
     10120) for br in $BRIDGES; do echo "iif $br lookup main suppress_prefixlength 0"; done ;;
     10130) for br in $BRIDGES; do echo "iif $br lookup $TABLE"; done ;;
   esac
@@ -150,18 +158,22 @@ up() {
     mkdir -p "$RT_TABLES_DIR"
     echo "$TABLE $TABLE_NAME" > "$RT_TABLES_DIR/$TABLE_NAME.conf"
   fi
-  ipset create "$DIRECT_SET" hash:net -exist
-  ipset create "$FORCE_EXIT_SET" hash:net -exist
 
-  # 1. Fail-closed backstop first.
+  # 1. Fail-closed backstop first (the rt_tables name above has no effect on
+  #    traffic).
   ensure_docker_user
   fwd_rules | install_chain filter DOCKER-USER MULTIHOP-FWD
   ip6_drop
 
-  # 2. Direct marking (one PREROUTING jump per bridge), NAT and MSS clamp.
+  # 2. Marking (one PREROUTING jump per bridge, so the chain only ever sees
+  #    bridge traffic), NAT and MSS clamp. The reply mark comes before the
+  #    force_exit RETURN so a reply to a force_exit address is still marked.
+  ipset create "$DIRECT_SET" hash:net -exist
+  ipset create "$FORCE_EXIT_SET" hash:net -exist
   local br jumps=()
   for br in $BRIDGES; do jumps+=("-i $br"); done
   install_chain mangle PREROUTING MULTIHOP-MARK "${jumps[@]}" <<RULES
+$AWG_REPLY -j MARK --set-mark $REPLY_MARK
 -m set --match-set $FORCE_EXIT_SET dst -j RETURN
 -m set --match-set $DIRECT_SET dst -j MARK --set-mark $DIRECT_MARK
 RULES
