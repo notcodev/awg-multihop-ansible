@@ -1,0 +1,10 @@
+{#- Server IP is the first host of entry_awg_subnet (10.8.1.0/24 -> 10.8.1.1) -#}
+{%- set _base = (entry_awg_subnet | split('/'))[0].split('.') -%}
+{%- set _prefix = (entry_awg_subnet | split('/'))[1] -%}
+[Interface]
+PrivateKey = {{ vault_entry_awg.private_key }}
+Address = {{ _base[:3] | join('.') }}.{{ (_base[3] | int) + 1 }}/{{ _prefix }}
+ListenPort = {{ entry_awg_port }}
+{% for line in vault_entry_awg.params | awg_params_lines(true) %}
+{{ line }}
+{% endfor %}

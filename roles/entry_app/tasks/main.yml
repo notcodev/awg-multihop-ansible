@@ -1,0 +1,141 @@
+---
+# Pre-check: if the app (or anyone) re-created the container without the bind
+# mount, fail before touching anything. Skipped during an explicit restore,
+# which is the recovery path and re-creates the container with the mount.
+- name: Look up the app container
+  community.docker.docker_container_info:
+    name: "{{ entry_app_container }}"
+  register: entry_app_pre_info
+  tags: [entry_app_drift_check]
+
+- name: Assert the app container still has the state bind mount
+  ansible.builtin.assert:
+    that: >-
+      (entry_app_pre_info.container.Mounts | default([])
+       | selectattr('Destination', 'equalto', '/opt/amnezia/awg') | list | length) > 0
+    fail_msg: "{{ entry_app_drift_msg }}"
+    quiet: true
+  when:
+    - entry_app_pre_info.exists
+    - entry_restore_archive | length == 0
+  tags: [entry_app_drift_check]
+  vars:
+    entry_app_drift_msg: >-
+      {{ entry_app_container }} has no bind mount at /opt/amnezia/awg (the Amnezia
+      app probably re-installed it). User state is gone from the container; recover
+      it by running playbooks/restore.yml with a backup archive.
+
+- name: Restore state from backup
+  ansible.builtin.include_tasks: restore.yml
+  when: entry_restore_archive | length > 0
+
+# Seed files are written only when awg0.conf is absent. Once the app owns them
+# (users added, clientsTable created) they are never touched again.
+- name: Seed state files on first deploy
+  tags: [entry_app_seed]
+  block:
+    - name: Create state directory
+      ansible.builtin.file:
+        path: "{{ entry_state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Check for existing awg0.conf
+      ansible.builtin.stat:
+        path: "{{ entry_state_dir }}/awg0.conf"
+      register: entry_app_conf_stat
+
+    - name: Seed awg0.conf
+      ansible.builtin.template:
+        src: awg0.conf.j2
+        dest: "{{ entry_state_dir }}/awg0.conf"
+        mode: "0600"
+      when: not entry_app_conf_stat.stat.exists
+      no_log: true
+
+    - name: Seed key files
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ entry_state_dir }}/{{ item.file }}"
+        mode: "0600"
+      when: not entry_app_conf_stat.stat.exists
+      no_log: true
+      loop:
+        - { file: wireguard_server_private_key.key, value: "{{ vault_entry_awg.private_key }}" }
+        - { file: wireguard_server_public_key.key, value: "{{ vault_entry_awg.public_key }}" }
+        - { file: wireguard_psk.key, value: "{{ vault_entry_awg.psk }}" }
+
+- name: Create the app docker network
+  community.docker.docker_network:
+    name: "{{ entry_app_network }}"
+    driver: bridge
+    driver_options:
+      com.docker.network.bridge.name: "{{ entry_app_network_bridge }}"
+    ipam_config:
+      - subnet: "{{ entry_app_network_subnet }}"
+
+- name: Create image build directory
+  ansible.builtin.file:
+    path: "{{ entry_app_build_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Stage Dockerfile
+  ansible.builtin.copy:
+    src: Dockerfile
+    dest: "{{ entry_app_build_dir }}/Dockerfile"
+    mode: "0644"
+
+- name: Stage start.sh
+  ansible.builtin.template:
+    src: start.sh.j2
+    dest: "{{ entry_app_build_dir }}/start.sh"
+    mode: "0755"
+
+- name: Build the app image
+  community.docker.docker_image:
+    name: "{{ entry_app_container }}"
+    source: build
+    force_source: true
+    build:
+      path: "{{ entry_app_build_dir }}"
+      pull: false
+
+- name: Run the app container
+  community.docker.docker_container:
+    name: "{{ entry_app_container }}"
+    image: "{{ entry_app_container }}"
+    state: started
+    restart_policy: always
+    privileged: true
+    capabilities:
+      - NET_ADMIN
+      - SYS_MODULE
+    log_driver: none
+    published_ports:
+      - "{{ entry_awg_port }}:{{ entry_awg_port }}/udp"
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - /lib/modules:/lib/modules
+      - "{{ entry_state_dir }}:/opt/amnezia/awg"
+    networks:
+      - name: bridge
+      - name: "{{ entry_app_network }}"
+
+- name: Inspect the app container
+  community.docker.docker_container_info:
+    name: "{{ entry_app_container }}"
+  register: entry_app_post_info
+  tags: [entry_app_drift_check]
+
+- name: Assert the app container has the state bind mount
+  ansible.builtin.assert:
+    that: >-
+      (entry_app_post_info.container.Mounts | default([])
+       | selectattr('Destination', 'equalto', '/opt/amnezia/awg') | list | length) > 0
+    fail_msg: >-
+      {{ entry_app_container }} has no bind mount at /opt/amnezia/awg. Recover
+      user state by running playbooks/restore.yml with a backup archive.
+    quiet: true
+  tags: [entry_app_drift_check]

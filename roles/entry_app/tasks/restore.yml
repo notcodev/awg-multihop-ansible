@@ -1,0 +1,75 @@
+---
+# Restore the entry state directory from a decrypted backup archive.
+# The backup wins over vault values (the seed tasks then see awg0.conf and skip).
+- name: Check the archive exists on the controller
+  ansible.builtin.stat:
+    path: "{{ entry_restore_archive }}"
+  delegate_to: localhost
+  become: false
+  register: entry_app_archive_stat
+
+- name: Fail if the restore archive is missing
+  ansible.builtin.assert:
+    that: entry_app_archive_stat.stat.exists
+    fail_msg: "entry_restore_archive {{ entry_restore_archive }} does not exist on the controller"
+
+- name: Look up the app container
+  community.docker.docker_container_info:
+    name: "{{ entry_app_container }}"
+  register: entry_app_restore_info
+
+- name: Stop the app container
+  community.docker.docker_container:
+    name: "{{ entry_app_container }}"
+    state: stopped
+  when: entry_app_restore_info.exists
+
+- name: Create state directory
+  ansible.builtin.file:
+    path: "{{ entry_state_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: List current state files
+  ansible.builtin.find:
+    paths: "{{ entry_state_dir }}"
+    hidden: true
+    file_type: any
+  register: entry_app_old_files
+
+- name: Remove current state files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ entry_app_old_files.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Extract the backup into the state directory
+  ansible.builtin.unarchive:
+    src: "{{ entry_restore_archive }}"
+    dest: "{{ entry_state_dir }}"
+    mode: "u=rwX,go="
+  no_log: true
+
+- name: Read restored server private key
+  ansible.builtin.slurp:
+    src: "{{ entry_state_dir }}/wireguard_server_private_key.key"
+  register: entry_app_restored_key
+  failed_when: false
+  no_log: true
+
+- name: Warn when the backup differs from the vault
+  ansible.builtin.debug:
+    msg: >-
+      The restored server private key differs from vault_entry_awg.private_key.
+      The backup wins; update the vault if it should match.
+  when:
+    - entry_app_restored_key.content is defined
+    - (entry_app_restored_key.content | b64decode | trim) != vault_entry_awg.private_key
+
+- name: Start the app container again
+  community.docker.docker_container:
+    name: "{{ entry_app_container }}"
+    state: started
+  when: entry_app_restore_info.exists

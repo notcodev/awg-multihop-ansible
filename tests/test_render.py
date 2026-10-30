@@ -81,3 +81,36 @@ def test_exit_conf_other_subnet():
                   {"uplink_subnet": "192.168.7.4/30"})
     assert "Address = 192.168.7.5/30" in text
     assert "AllowedIPs = 192.168.7.6/32" in text
+
+
+def test_awg0_conf_matches_app_layout():
+    fx = _fixture()
+    text = render("roles/entry_app/templates/awg0.conf.j2", "awg0.conf")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    key = fx["vault_entry_awg"]["private_key"]
+    assert lines[:4] == [
+        "[Interface]",
+        f"PrivateKey = {key}",
+        "Address = 10.8.1.1/24",
+        f"ListenPort = {fx['entry_awg_port']}",
+    ]
+    assert lines[4] == "Jc = 4"
+    assert f"# I1 = {fx['vault_entry_awg']['params']['i1']}" in lines
+    assert not any(ln.startswith("I1") for ln in lines)
+    assert "[Peer]" not in text
+    for ln in lines[1:]:
+        assert " = " in ln.lstrip("# ")
+
+
+def test_awg0_conf_other_subnet():
+    text = render("roles/entry_app/templates/awg0.conf.j2", "awg0.conf",
+                  {"entry_awg_subnet": "10.20.30.0/23"})
+    assert "Address = 10.20.30.1/23" in text
+
+
+def test_start_sh_substitutes_subnet():
+    text = render("roles/entry_app/templates/start.sh.j2", "start.sh")
+    assert "-s 10.8.1.0/24 -o eth0 -j MASQUERADE" in text
+    assert "-s 10.8.1.0/24 -o eth1 -j MASQUERADE" in text
+    assert "$AWG_SUBNET_IP" not in text
+    assert "$WIREGUARD_SUBNET_CIDR" not in text

@@ -1,0 +1,10 @@
+---
+entry_state_dir: /var/lib/multihop/entry-awg  # noqa: var-naming[no-role-prefix]
+entry_app_container: amnezia-awg2
+entry_app_build_dir: /var/lib/multihop/entry-app-build
+entry_app_network: amnezia-dns-net
+entry_app_network_subnet: 172.29.172.0/24
+entry_app_network_bridge: amn0
+# Set by playbooks/restore.yml: controller-local path to a decrypted tar of
+# the state directory (contents at the archive root, e.g. ./awg0.conf).
+entry_restore_archive: ""  # noqa: var-naming[no-role-prefix]
