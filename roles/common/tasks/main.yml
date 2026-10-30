@@ -25,16 +25,6 @@
     - { key: net.ipv4.conf.all.src_valid_mark, value: "1" }
     - { key: net.ipv6.conf.all.forwarding, value: "0" }
 
-- name: Pull pinned base image by digest
-  community.docker.docker_image:
-    name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
-    source: pull
-
-- name: Tag base image locally
-  community.docker.docker_image_tag:
-    name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
-    repository: "{{ common_base_image_tag }}"
-
 - name: Create multihop config directory
   ansible.builtin.file:
     path: /etc/multihop
@@ -51,6 +41,48 @@
     owner: root
     group: root
 
+- name: Read applied base image digest marker
+  ansible.builtin.slurp:
+    src: /var/lib/multihop/awg-base.digest
+  register: common_applied_digest
+  failed_when: false
+
+- name: Inspect pinned base image tag
+  community.docker.docker_image_info:
+    name: "{{ common_base_image_tag }}"
+  register: common_pinned_image
+
+- name: Pull, tag and untag pinned base image
+  when: >-
+    (common_pinned_image.images | length == 0)
+    or (common_applied_digest.content | default('') | b64decode | trim) != awg_base_image_digest
+  block:
+    - name: Pull pinned base image by digest
+      community.docker.docker_image:
+        name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
+        source: pull
+
+    - name: Tag base image locally
+      community.docker.docker_image_tag:
+        name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
+        repository: "{{ common_base_image_tag }}"
+        force: true
+
+    # Keep `docker images` free of the upstream name; only the digest
+    # reference is removed, the multihop tag stays.
+    - name: Remove upstream reference (untag only)
+      community.docker.docker_image:
+        name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
+        state: absent
+
+    - name: Record applied base image digest
+      ansible.builtin.copy:
+        content: "{{ awg_base_image_digest }}\n"
+        dest: /var/lib/multihop/awg-base.digest
+        mode: "0644"
+        owner: root
+        group: root
+
 # Own marker so blocks appended by later roles survive re-runs.
 - name: Write common keys to multihop.env
   ansible.builtin.blockinfile:
@@ -61,7 +93,7 @@
     group: root
     marker: "# {mark} ANSIBLE MANAGED BLOCK common"
     block: "{{ lookup('ansible.builtin.template', 'multihop.env.j2') }}"
-  notify: Restart multihop-input-fw
+  notify: Reload multihop-input-fw
 
 - name: Install multihop-input-fw
   ansible.builtin.copy:
@@ -70,7 +102,7 @@
     mode: "0755"
     owner: root
     group: root
-  notify: Restart multihop-input-fw
+  notify: Reload multihop-input-fw
 
 - name: Install multihop-input-fw unit
   ansible.builtin.template:
@@ -81,7 +113,7 @@
     group: root
   notify:
     - Reload systemd
-    - Restart multihop-input-fw
+    - Reload multihop-input-fw
 
 - name: Flush handlers before enabling firewall
   ansible.builtin.meta: flush_handlers

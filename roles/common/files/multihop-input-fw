@@ -8,33 +8,47 @@ MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
 . "$MULTIHOP_ENV"
 
 CHAIN=MULTIHOP-IN
+NEW=MULTIHOP-IN-NEW
 : "${PUBLIC_IFACE:?PUBLIC_IFACE not set in $MULTIHOP_ENV}"
 : "${SSH_PORT:=22}"
 : "${INPUT_UDP_PORTS:=}"
 : "${INPUT_TCP_PORTS:=}"
 
+# Remove every jump to chain $1, then flush and delete it (if present).
+drop_chain() {
+  local c="$1"
+  while iptables -C INPUT -j "$c" 2>/dev/null; do
+    iptables -D INPUT -j "$c"
+  done
+  if iptables -F "$c" 2>/dev/null; then
+    iptables -X "$c" 2>/dev/null || true
+  fi
+}
+
+# Build a fresh chain, swap the INPUT jump to it, retire the old chain, then
+# rename. INPUT is never left without the jump.
 up() {
-  iptables -N "$CHAIN" 2>/dev/null || iptables -F "$CHAIN"
-  iptables -A "$CHAIN" -i lo -j ACCEPT
-  iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  iptables -A "$CHAIN" -p tcp --dport "$SSH_PORT" -j ACCEPT
+  drop_chain "$NEW"
+  iptables -N "$NEW"
+  iptables -A "$NEW" -i lo -j ACCEPT
+  iptables -A "$NEW" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A "$NEW" -p tcp --dport "$SSH_PORT" -j ACCEPT
   local p
   for p in $INPUT_UDP_PORTS; do
-    iptables -A "$CHAIN" -p udp --dport "$p" -j ACCEPT
+    iptables -A "$NEW" -p udp --dport "$p" -j ACCEPT
   done
   for p in $INPUT_TCP_PORTS; do
-    iptables -A "$CHAIN" -p tcp --dport "$p" -j ACCEPT
+    iptables -A "$NEW" -p tcp --dport "$p" -j ACCEPT
   done
-  iptables -A "$CHAIN" -i "$PUBLIC_IFACE" -j DROP
-  iptables -C INPUT -j "$CHAIN" 2>/dev/null || iptables -I INPUT -j "$CHAIN"
+  iptables -A "$NEW" -i "$PUBLIC_IFACE" -j DROP
+  iptables -I INPUT -j "$NEW"
+  drop_chain "$CHAIN"
+  iptables -E "$NEW" "$CHAIN"
 }
 
 down() {
-  while iptables -C INPUT -j "$CHAIN" 2>/dev/null; do
-    iptables -D INPUT -j "$CHAIN"
-  done
-  iptables -F "$CHAIN" 2>/dev/null || true
-  iptables -X "$CHAIN" 2>/dev/null || true
+  drop_chain "$CHAIN"
+  drop_chain "$NEW"
 }
 
 case "${1:-}" in

@@ -3,7 +3,7 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
 
-- name: Restart multihop-input-fw
+- name: Reload multihop-input-fw
   ansible.builtin.systemd_service:
     name: multihop-input-fw
-    state: restarted
+    state: reloaded

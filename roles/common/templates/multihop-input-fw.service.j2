@@ -1,13 +1,15 @@
 [Unit]
 Description=Multihop INPUT firewall
-Before=network-online.target
+DefaultDependencies=no
+Before=network-pre.target shutdown.target
 Wants=network-pre.target
-After=network-pre.target
+Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/multihop-input-fw up
+ExecReload=/usr/local/sbin/multihop-input-fw up
 ExecStop=/usr/local/sbin/multihop-input-fw down
 
 [Install]
