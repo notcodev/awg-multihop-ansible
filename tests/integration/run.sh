@@ -14,7 +14,9 @@
 # Hosts come from the environment or tests/integration/.state/lab.env:
 #   ENTRY_IP, EXIT_IP     entry and exit
 #   EXIT2_IP              new exit for the swap test
-#   CLIENT_IP             test VPN client host, default EXIT2_IP (else EXIT_IP)
+#   CLIENT_IP             test VPN client host, default EXIT2_IP (else EXIT_IP); best
+#                         a host that is not the current exit, so the egress-IP
+#                         check discriminates (client_via_exit notes it otherwise)
 # S3 (backup checks): tests/integration/.state/s3.env with BACKUP_S3_ENDPOINT,
 #   BACKUP_S3_REGION, BACKUP_S3_BUCKET, BACKUP_S3_PREFIX, WRITER_ACCESS_KEY,
 #   WRITER_SECRET_KEY, READER_ACCESS_KEY, READER_SECRET_KEY. Without it the
@@ -35,6 +37,8 @@ SSH_KEY="${SSH_KEY:-$STATE/id_ed25519}"
 KNOWN_HOSTS="${KNOWN_HOSTS:-$STATE/known_hosts}"
 CLIENT_IP="${CLIENT_IP:-${EXIT2_IP:-${EXIT_IP:-}}}"
 CLIENT_TUN_IP=10.8.1.2
+# The only plays of swap-exit.yml allowed to touch the entry.
+SWAP_ENTRY_PLAYS="Point the exit DNS record at the new exit|Wait for the entry to handshake with the new exit|Verify the entry egresses through the exit"
 # Reports changed on every run by design (fills the split sets now).
 ALWAYS_CHANGED="split_routing : Run the first refresh"
 mkdir -p "$LOGS"
@@ -146,9 +150,13 @@ doc["lab_client_key"] = {"private_key": awg.genkey()}
 (age_key.parent / "lab-ports").write_text(f"{ports[1]} {ports[2]}\n")
 PY
     ) || die "generating secrets failed"
-    uv run ansible-vault encrypt "$gv/vault.yml" "$gv/vault_uplink.yml" >/dev/null \
-      || die "encrypting the lab vault failed"
   fi
+  # Also catches a half-finished earlier init that left them in plaintext.
+  local f
+  for f in "$gv/vault.yml" "$gv/vault_uplink.yml"; do
+    [ "$(head -c 14 "$f")" = '$ANSIBLE_VAULT' ] && continue
+    uv run ansible-vault encrypt "$f" >/dev/null || die "encrypting $f failed"
+  done
   # S3 location and keys: rewritten on every init from .state/s3.env (never printed).
   (umask 077
    uv run python - "$gv" "$STATE/age.key" "$STATE/s3.env" <<'PY'
@@ -260,15 +268,26 @@ fwd_counter() { # fwd_counter direct|awg|drop: packets in MULTIHOP-FWD rules of 
   on "$ENTRY_IP" "iptables -nvxL MULTIHOP-FWD" | awk -v p="$pat" 'index($0, p) { s += $1 } END { print s + 0 }'
 }
 
-capture() { # capture <ip> <seconds> <iface> <filter> > file: packet lines (run in background)
-  on "$1" "timeout $2 tcpdump -lnni $3 '$4' 2>/dev/null"
+pubif() { # pubif <ip>: the host's PUBLIC_IFACE from its multihop.env
+  on "$1" '. /etc/multihop/multihop.env && echo "$PUBLIC_IFACE"'
 }
 
-pkts() { # pkts <capture file>: "<count>[ first: <first packet>]"
-  local n
-  n=$(grep -c . "$1")
-  if [ "$n" -gt 0 ]; then echo "$n first: $(head -n 1 "$1" | cut -c1-120)"; else echo 0; fi
+capture() { # capture <ip> <seconds> <iface> <filter> > file (run in background)
+  # tcpdump's stderr ("listening on ...") and its exit status are kept: a
+  # capture that never ran must not read as "0 packets".
+  on "$1" "timeout $2 tcpdump -lnni $3 '$4' 2>&1; echo tcpdump-rc=\$?"
 }
+
+pkts() { # pkts <capture file>: "<count>[ first: <packet>]", or "ERR(...)" if tcpdump did not run
+  local n
+  if ! grep -q '^listening on ' "$1" || ! grep -qx 'tcpdump-rc=124' "$1"; then
+    echo "ERR($(grep -v '^[0-9][0-9]:' "$1" | tr '\n' ' ' | cut -c1-100))"; return
+  fi
+  n=$(grep -cE '^[0-9]{2}:[0-9]{2}:[0-9]{2}\.' "$1")
+  if [ "$n" -gt 0 ]; then echo "$n first: $(grep -m1 -E '^[0-9]{2}:' "$1" | cut -c1-120)"; else echo 0; fi
+}
+
+ge1() { [ "${1%% *}" -ge 1 ] 2>/dev/null; } # count from pkts() >= 1 (ERR -> false)
 
 entry_hashes() {
   on "$ENTRY_IP" 'cd /var/lib/multihop/entry-awg && sha256sum awg0.conf clientsTable' | awk '{print $1}' | paste -sd' ' -
@@ -300,14 +319,18 @@ ck_first_run_reload() { # [log name]: handlers with state: reloaded on a unit no
 }
 
 ck_images_clean() {
-  local imgs ps opt
+  local imgs ps opt ref digest_ref
   imgs=$(on "$ENTRY_IP" "docker images --format '{{.Repository}}:{{.Tag}}' | grep amnezia" | paste -sd' ' -)
   ps=$(on "$ENTRY_IP" "docker ps -a --format '{{.Names}} {{.Image}}' | grep amnezia" | paste -sd' ' -)
   opt=$(on "$ENTRY_IP" 'ls -d /opt/amnezia 2>/dev/null')
-  if [ "$imgs" = "amnezia-awg2:latest" ] && [ "$ps" = "amnezia-awg2 amnezia-awg2" ] && [ -z "$opt" ]; then
-    result PASS images_clean "images: $imgs; containers: $ps; host /opt/amnezia absent"
+  # The containerd image store hides digest-only references from `docker images`.
+  ref="amneziavpn/amneziawg-go@$(awk '$1 == "awg_base_image_digest:" { print $2 }' "$INV/group_vars/all/vars.yml")"
+  digest_ref=$(on "$ENTRY_IP" "docker image inspect -f '{{.Id}}' $ref 2>/dev/null")
+  if [ "$imgs" = "amnezia-awg2:latest" ] && [ "$ps" = "amnezia-awg2 amnezia-awg2" ] && [ -z "$opt" ] \
+     && [ -z "$digest_ref" ]; then
+    result PASS images_clean "images: $imgs; containers: $ps; host /opt/amnezia absent; no $ref reference"
   else
-    result FAIL images_clean "images: '$imgs'; containers: '$ps'; /opt/amnezia: '$opt'"
+    result FAIL images_clean "images: '$imgs'; containers: '$ps'; /opt/amnezia: '$opt'; $ref: '$digest_ref'"
   fi
 }
 
@@ -352,8 +375,10 @@ ck_client_via_exit() {
   b=$(exit_bytes "$EXIT_NOW")
   ip=$(client_curl https://api.ipify.org)
   a=$(exit_bytes "$EXIT_NOW")
+  local note=""
+  [ "$CLIENT_IP" = "$EXIT_NOW" ] && note=" (client host IS the exit: the IP match alone does not discriminate)"
   if [ "$ip" = "$EXIT_NOW" ] && [ "$a" -gt "$b" ]; then
-    result PASS client_via_exit "client egress IP $ip (= exit); awg-exit bytes $b -> $a"
+    result PASS client_via_exit "client egress IP $ip (= exit, client host $CLIENT_IP)$note; awg-exit bytes $b -> $a"
   else
     result FAIL client_via_exit "client egress '$ip' (exit $EXIT_NOW); awg-exit bytes $b -> $a"
   fi
@@ -372,57 +397,104 @@ ck_client_direct() {
 }
 
 ck_client_udp_sport() { # user UDP from source port entry_awg_port goes via the uplink
-  local p q ent ext ans ct
-  p=$(P)
+  local p q ent ext ans ct eif xif
+  p=$(P); eif=$(pubif "$ENTRY_IP"); xif=$(pubif "$EXIT_NOW")
   q='\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01'
-  capture "$ENTRY_IP" 15 eth0 'udp and host 1.1.1.1 and port 53' > "$STATE/cap-entry" &
-  capture "$EXIT_NOW" 15 eth0 'udp and dst host 1.1.1.1 and dst port 53' > "$STATE/cap-exit" &
+  capture "$ENTRY_IP" 15 "$eif" 'udp and host 1.1.1.1 and port 53' > "$STATE/cap-entry" &
+  capture "$EXIT_NOW" 15 "$xif" 'udp and dst host 1.1.1.1 and dst port 53' > "$STATE/cap-exit" &
   sleep 3
   ans=$(client bash -c "printf '$q' | timeout 5 nc -u -p $p -w 3 1.1.1.1 53 | wc -c" | tr -d ' ')
   ct=$(on "$ENTRY_IP" "conntrack -L -p udp --dst 1.1.1.1 --dport 53 2>/dev/null | grep -o 'sport=[0-9]*' | head -n 1")
   wait
   ent=$(pkts "$STATE/cap-entry"); ext=$(pkts "$STATE/cap-exit")
-  if [ "$ent" = 0 ] && [ "${ext%% *}" -ge 1 ] && [ "${ans:-0}" -gt 0 ]; then
-    result PASS client_udp_sport "client UDP sport $p -> 1.1.1.1:53: answer ${ans}B; entry eth0 pkts=0, exit eth0 pkts=$ext; host conntrack $ct"
+  if [ "$ent" = 0 ] && ge1 "$ext" && [ "${ans:-0}" -gt 0 ] 2>/dev/null; then
+    result PASS client_udp_sport "client UDP sport $p -> 1.1.1.1:53: answer ${ans}B; entry $eif pkts=0, exit $xif pkts=$ext; host conntrack $ct"
   else
-    result FAIL client_udp_sport "answer=${ans:-0}B entry eth0 pkts=$ent exit eth0 pkts=$ext conntrack $ct"
+    result FAIL client_udp_sport "answer=${ans:-0}B entry $eif pkts=$ent exit $xif pkts=$ext conntrack $ct"
   fi
 }
 
 ck_client_fail_closed() {
-  local ent rc
+  # Positive evidence: the client's packets do reach the entry (docker0, out of
+  # amnezia-awg2) and are dropped there (table 51820's blackhole: the routing
+  # drop happens before FORWARD, so the MULTIHOP-FWD DROP counter is only
+  # informational), while none leave the public interface.
+  local ent br rc eif d0 d1
+  eif=$(pubif "$ENTRY_IP")
   on "$ENTRY_IP" docker stop multihop-uplink >/dev/null
-  capture "$ENTRY_IP" 20 eth0 'host 1.1.1.1' > "$STATE/cap-entry" &
+  d0=$(fwd_counter drop)
+  capture "$ENTRY_IP" 20 "$eif" 'host 1.1.1.1' > "$STATE/cap-entry" &
+  capture "$ENTRY_IP" 20 docker0 'dst host 1.1.1.1' > "$STATE/cap-bridge" &
   sleep 3
   client_curl -o /dev/null --max-time 8 https://1.1.1.1; rc=$?
   wait
-  ent=$(pkts "$STATE/cap-entry")
+  d1=$(fwd_counter drop)
+  ent=$(pkts "$STATE/cap-entry"); br=$(pkts "$STATE/cap-bridge")
   on "$ENTRY_IP" docker start multihop-uplink >/dev/null
   wait_uplink && wait_client
-  if [ "$rc" -ne 0 ] && [ "$ent" = 0 ]; then
-    result PASS client_fail_closed "uplink stopped: client curl rc=$rc, entry eth0 pkts to/from 1.1.1.1 = 0; restored after start"
+  if [ "$rc" -ne 0 ] && [ "$ent" = 0 ] && ge1 "$br"; then
+    result PASS client_fail_closed "uplink stopped: client curl rc=$rc; docker0 pkts to 1.1.1.1=$br; $eif pkts=0; FWD DROP $d0 -> $d1; restored after start"
   else
-    result FAIL client_fail_closed "uplink stopped: client curl rc=$rc, entry eth0 pkts=$ent"
+    result FAIL client_fail_closed "uplink stopped: client curl rc=$rc; docker0=$br; $eif=$ent; FWD DROP $d0 -> $d1"
+  fi
+}
+
+ck_client_private_net() {
+  # A provider private network on another NIC: user traffic to it must be
+  # dropped on the entry (allow-list backstop), not leave unencrypted.
+  local cap rc d0 d1
+  on "$ENTRY_IP" 'ip link add mhpriv0 type dummy 2>/dev/null; ip addr replace 10.77.0.1/24 dev mhpriv0 && ip link set mhpriv0 up'
+  d0=$(fwd_counter drop)
+  capture "$ENTRY_IP" 15 mhpriv0 'host 10.77.0.5' > "$STATE/cap-priv" &
+  sleep 3
+  client_curl -o /dev/null --max-time 6 http://10.77.0.5/; rc=$?
+  wait
+  d1=$(fwd_counter drop)
+  cap=$(pkts "$STATE/cap-priv")
+  on "$ENTRY_IP" 'ip link del mhpriv0'
+  if [ "$rc" -ne 0 ] && [ "$cap" = 0 ] && [ "$d1" -gt "$d0" ]; then
+    result PASS client_private_net "client -> 10.77.0.5 (dummy private NIC on the entry): curl rc=$rc, mhpriv0 pkts=0, MULTIHOP-FWD DROP $d0 -> $d1"
+  else
+    result FAIL client_private_net "curl rc=$rc, mhpriv0 pkts=$cap, MULTIHOP-FWD DROP $d0 -> $d1"
   fi
 }
 
 ck_idle_reply() { # server-initiated packet after the host conntrack entry expired
-  local p ct eth up
-  p=$(P)
+  local p ct eth up eif
+  p=$(P); eif=$(pubif "$ENTRY_IP")
   log "idle_reply: keeping the client silent for 135 s"
   sleep 135
   ct=$(on "$ENTRY_IP" "conntrack -L -p udp --orig-port-dst $p 2>/dev/null | grep -c 'src=$CLIENT_IP'")
-  capture "$ENTRY_IP" 15 eth0 "udp and src port $p and dst host $CLIENT_IP" > "$STATE/cap-entry" &
+  capture "$ENTRY_IP" 15 "$eif" "udp and src port $p and dst host $CLIENT_IP" > "$STATE/cap-entry" &
   capture "$ENTRY_IP" 15 awg-uplink "host $CLIENT_IP" > "$STATE/cap-uplink" &
   sleep 3
   on "$ENTRY_IP" "docker exec amnezia-awg2 ping -c 3 -W 1 $CLIENT_TUN_IP" >/dev/null 2>&1
   wait
   eth=$(pkts "$STATE/cap-entry"); up=$(pkts "$STATE/cap-uplink")
   wait_client || wait_client
-  if [ "$ct" = 0 ] && [ "${eth%% *}" -ge 1 ] && [ "$up" = 0 ]; then
-    result PASS idle_reply "after 135 s idle (conntrack entries for client: 0) ping from amnezia-awg2: eth0 udp sport $p -> client pkts=$eth, awg-uplink pkts=0; client reconnects"
+  if [ "$ct" = 0 ] && ge1 "$eth" && [ "$up" = 0 ]; then
+    result PASS idle_reply "after 135 s idle (conntrack entries for client: 0) ping from amnezia-awg2: $eif udp sport $p -> client pkts=$eth, awg-uplink pkts=0; client reconnects"
   else
-    result FAIL idle_reply "conntrack entries=$ct eth0 sport $p pkts=$eth awg-uplink pkts=$up"
+    result FAIL idle_reply "conntrack entries=$ct $eif sport $p pkts=$eth awg-uplink pkts=$up"
+  fi
+}
+
+ck_group_heal() { # public interface group: verify catches its loss, reresolve restores it, udev matches
+  local eif vf healed=0 udev t
+  eif=$(pubif "$ENTRY_IP")
+  on "$ENTRY_IP" "ip link set dev $eif group default"
+  ap verify-nogroup playbooks/verify.yml
+  vf=$(grep -c 'not in group 51820' "$LOGS/verify-nogroup.log")
+  for t in $(seq 1 18); do  # the re-resolve timer runs every minute
+    if on "$ENTRY_IP" "ip -d link show dev $eif | grep -qw 'group 51820'"; then healed=$((t * 5)); break; fi
+    sleep 5
+  done
+  udev=$(on "$ENTRY_IP" "udevadm test /sys/class/net/$eif 2>&1 | grep -c 'ip link set dev .* group 51820'")
+  [ "$healed" -gt 0 ] || on "$ENTRY_IP" "ip link set dev $eif group 51820"
+  if [ "$vf" -ge 1 ] && [ "$healed" -gt 0 ] && [ "${udev:-0}" -ge 1 ]; then
+    result PASS group_heal "group removed from $eif: verify.yml failed on it; multihop-reresolve restored it within ${healed}s; udevadm test runs the group rule"
+  else
+    result FAIL group_heal "verify failed on group: $vf; healed after: ${healed}s; udev rule matched: ${udev:-0}"
   fi
 }
 
@@ -433,15 +505,18 @@ ck_verify_fail_closed() { # brief 3.3
   wait_client
 }
 
-rules_ok() {
-  on "$ENTRY_IP" 'ip rule | grep -cE "^101[0-3]0:"; iptables -S MULTIHOP-FWD | grep -c DROP' | paste -sd' ' -
+RULES_EXPECTED="rules=6 drops=2 group=1"
+rules_ok() { # "rules=<ip rules 10100-10130> drops=<MULTIHOP-FWD DROPs> group=<public iface in 51820>"
+  on "$ENTRY_IP" '. /etc/multihop/multihop.env
+    echo "rules=$(ip rule | grep -cE "^101[0-3]0:") drops=$(iptables -S MULTIHOP-FWD | grep -c -- "-j DROP")" \
+      "group=$(ip -d link show dev "$PUBLIC_IFACE" | grep -cw "group 51820")"'
 }
 
 ck_docker_restart() { # brief 3.4
   local r
   on "$ENTRY_IP" systemctl restart docker
   r=$(rules_ok)
-  if ap verify-docker playbooks/verify.yml && wait_client; then
+  if [ "$r" = "$RULES_EXPECTED" ] && ap verify-docker playbooks/verify.yml && wait_client; then
     result PASS docker_restart "after systemctl restart docker: ip rules/FWD drops '$r'; verify.yml ok; client back"
   else
     result FAIL docker_restart "rules '$r'; see $LOGS/verify-docker.log"
@@ -455,7 +530,8 @@ ck_reboot() { # brief 3.5 / Review Focus 2
   r=$(rules_ok)
   order=$(on "$ENTRY_IP" 'n=$(systemctl show -P ActiveEnterTimestampMonotonic multihop-net); d=$(systemctl show -P ExecMainStartTimestampMonotonic docker); echo "multihop-net=$n docker-start=$d"; [ "$n" -gt 0 ] && [ "$n" -lt "$d" ]')
   local ok=$?
-  if [ "$ok" = 0 ] && ap verify-reboot playbooks/verify.yml -e verify_fail_closed=true && wait_client; then
+  if [ "$ok" = 0 ] && [ "$r" = "$RULES_EXPECTED" ] \
+     && ap verify-reboot playbooks/verify.yml -e verify_fail_closed=true && wait_client; then
     result PASS reboot "after reboot: $order (net before docker); rules '$r'; verify fail_closed ok; client back"
   else
     result FAIL reboot "order: $order (ok=$ok); rules '$r'; see $LOGS/verify-reboot.log"
@@ -536,7 +612,7 @@ ck_drift() { # brief 3.8 / Review Focus 5
 }
 
 CHECKS="first_run_reload images_clean to_ports idempotent peer_kept client_via_exit client_direct
-client_udp_sport client_fail_closed idle_reply verify_fail_closed docker_restart reboot
+client_udp_sport client_fail_closed client_private_net idle_reply group_heal verify_fail_closed docker_restart reboot
 container_direct backup drift"
 
 cmd_check() {
@@ -556,18 +632,21 @@ cmd_check() {
 
 cmd_swap() {
   need ENTRY_IP EXIT_IP EXIT2_IP
-  local pins ep c tasks
+  local pins ep c tasks other
   write_hosts exit2 exit1
-  touch "$STATE/swapped"
   if ap swap playbooks/swap-exit.yml; then
+    touch "$STATE/swapped"
     c=$(recap swap entry1 changed)
-    tasks=$(awk '/^PLAY \[/ { p = $0 } /^(ok|changed): \[entry1\]/ { print p }' "$LOGS/swap.log" | sort -u | paste -sd';' -)
+    # Plays that touched the entry, directly or delegated (`[exit2 -> entry1(...)]`).
+    tasks=$(awk '/^PLAY \[/ { p = $0; sub(/^PLAY \[/, "", p); sub(/\].*/, "", p) }
+                 /^(ok|changed): \[entry1\]/ || /-> entry1[](]/ { print p }' "$LOGS/swap.log" | sort -u | paste -sd';' -)
+    other=$(tr ';' '\n' <<<"$tasks" | grep -vxE "$SWAP_ENTRY_PLAYS")
     pins=$(on "$ENTRY_IP" "grep -F '$(awk '$1 == "exit_domain:" { print $2 }' "$INV/group_vars/all/vars.yml")' /etc/hosts")
     ep=$(on "$ENTRY_IP" 'docker exec multihop-uplink awg show awg-uplink endpoints' | awk '{print $2}')
-    if [ "$c" = 0 ] && [[ "$ep" == "$EXIT2_IP:"* ]]; then
-      result PASS swap_exit "swap-exit.yml ok; entry changed=0, entry ran only: $tasks; hosts pin '$pins'; endpoint $ep"
+    if [ "$c" = 0 ] && [ -z "$other" ] && [[ "$ep" == "$EXIT2_IP:"* ]]; then
+      result PASS swap_exit "swap-exit.yml ok; entry changed=0; plays touching the entry: $tasks; hosts pin '$pins'; endpoint $ep"
     else
-      result FAIL swap_exit "entry changed=$c ($tasks); endpoint $ep; pin '$pins'"
+      result FAIL swap_exit "entry changed=$c; unexpected plays on the entry: '$other' (all: $tasks); endpoint $ep; pin '$pins'"
     fi
   else
     result FAIL swap_exit "swap-exit.yml failed, see $LOGS/swap.log"

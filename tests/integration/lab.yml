@@ -98,9 +98,10 @@
           printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n\n' "$PUB" "$PSK" "$IP" \
             | ex "cat >> $D/awg0.conf"
           ex "[ -s $D/clientsTable ] || echo '[]' > $D/clientsTable"
-          ex "cat $D/clientsTable" \
-            | jq -c --arg id "$PUB" '. + [{clientId: $id, userData: {clientName: "lab-client", creationDate: "2026-10-31"}}]' \
-            | ex "cat > $D/clientsTable"
+          # Read fully before writing: a pipeline would truncate the file while reading it.
+          table=$(ex "cat $D/clientsTable")
+          jq -c --arg id "$PUB" '. + [{clientId: $id, userData: {clientName: "lab-client", creationDate: "2026-10-31"}}]' \
+            <<<"$table" | ex "cat > $D/clientsTable"
           ex "awg syncconf awg0 <(awg-quick strip $D/awg0.conf)"
           echo added
         executable: /bin/bash
