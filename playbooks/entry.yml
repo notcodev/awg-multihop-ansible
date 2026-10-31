@@ -1,0 +1,51 @@
+---
+# Deploy or converge the entry. Restores a backup first only when asked with
+# entry_restore_backup=true (swap-entry.yml does; backup_object picks a backup,
+# default: latest). For a restore onto the running entry use restore.yml.
+- name: Deploy the entry server
+  hosts: entry
+  become: true
+  tasks:
+    - name: Converge the entry
+      block:
+        - name: Restore needs exactly one entry host
+          ansible.builtin.assert:
+            that: ansible_play_hosts_all | length == 1
+            fail_msg: "The entry group must contain exactly one host"
+          when: entry_restore_backup | default(false) | bool
+
+        - name: Fetch, decrypt and validate the backup on the controller
+          ansible.builtin.include_tasks: tasks/fetch-backup.yml
+          when: entry_restore_backup | default(false) | bool
+
+        # Order matters: the fail-closed routing and firewall (entry_uplink)
+        # exist before amnezia-awg2 starts forwarding restored peers.
+        - name: Apply common
+          ansible.builtin.import_role:
+            name: common
+
+        - name: Apply entry_uplink
+          ansible.builtin.import_role:
+            name: entry_uplink
+
+        - name: Apply entry_app
+          ansible.builtin.import_role:
+            name: entry_app
+
+        - name: Apply split_routing
+          ansible.builtin.import_role:
+            name: split_routing
+
+        - name: Apply backup
+          ansible.builtin.import_role:
+            name: backup
+
+      always:
+        - name: Delete the decrypted backup from the controller
+          ansible.builtin.file:
+            path: "{{ entry_restore_tmpdir }}"
+            state: absent
+          delegate_to: localhost
+          become: false
+          run_once: true
+          when: entry_restore_tmpdir is defined

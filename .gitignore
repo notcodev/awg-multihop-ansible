@@ -7,3 +7,4 @@ tests/render/out/
 __pycache__/
 .pytest_cache/
 .DS_Store
+tests/fixtures/inventory-vault/

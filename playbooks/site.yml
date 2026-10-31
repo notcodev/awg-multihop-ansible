@@ -1,0 +1,10 @@
+---
+# Full deploy: exit first, then entry, then verify the path.
+- name: Deploy the exit
+  ansible.builtin.import_playbook: exit.yml
+
+- name: Deploy the entry
+  ansible.builtin.import_playbook: entry.yml
+
+- name: Verify
+  ansible.builtin.import_playbook: verify.yml

@@ -1,0 +1,52 @@
+---
+# Replace the entry's user state (awg0.conf, keys, clientsTable) with a backup.
+#   ansible-playbook playbooks/restore.yml [-e backup_object=entry-<ts>.tar.age] [-e confirm=yes]
+# Also the recovery path when the app re-installed amnezia-awg2 without the
+# bind mount. Users added after that backup are lost.
+- name: Confirm the restore
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Ask for confirmation
+      ansible.builtin.pause:
+        prompt: >-
+          This REPLACES all user state on the entry with backup
+          '{{ backup_object | default('latest', true) }}'. Users added after that backup
+          are lost. Type 'yes' to continue
+      register: restore_confirm
+      when: confirm | default('') != 'yes'
+
+    - name: Stop unless confirmed
+      ansible.builtin.assert:
+        that: restore_confirm.user_input | default('') | trim == 'yes'
+        fail_msg: "Restore cancelled"
+        quiet: true
+      when: confirm | default('') != 'yes'
+
+- name: Restore the entry state from backup
+  hosts: entry
+  become: true
+  tasks:
+    - name: Restore
+      block:
+        - name: Restore needs exactly one entry host
+          ansible.builtin.assert:
+            that: ansible_play_hosts_all | length == 1
+            fail_msg: "The entry group must contain exactly one host"
+
+        - name: Fetch, decrypt and validate the backup on the controller
+          ansible.builtin.include_tasks: tasks/fetch-backup.yml
+
+        - name: Apply entry_app with the backup
+          ansible.builtin.include_role:
+            name: entry_app
+
+      always:
+        - name: Delete the decrypted backup from the controller
+          ansible.builtin.file:
+            path: "{{ entry_restore_tmpdir }}"
+            state: absent
+          delegate_to: localhost
+          become: false
+          run_once: true
+          when: entry_restore_tmpdir is defined

@@ -1,0 +1,111 @@
+---
+# Move the entry to a new host, carrying users over through the backup.
+# Inventory: the new host in `entry`, the old one in `entry_old`.
+#   ansible-playbook playbooks/swap-entry.yml [-e backup_object=entry-<ts>.tar.age]
+#
+# Old entry reachable: final backup, then its app, uplink and backup timer are
+# stopped and disabled (no users added after the backup, and the two entries
+# never compete for the exit's single peer).
+# Old entry unreachable: a new entry-uplink key is written to
+# <inventory>/group_vars/all/vault_uplink.yml and pushed to the exit, so only
+# the new entry is accepted. Users added after the last backup are lost.
+- name: Check the swap inventory
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Exactly one old and one new entry host, and they differ
+      ansible.builtin.assert:
+        that:
+          - groups['entry'] | default([]) | length == 1
+          - groups['entry_old'] | default([]) | length == 1
+          - groups['entry'][0] != groups['entry_old'][0]
+        fail_msg: "Put the new entry in the entry group and the old one in entry_old (one host each)"
+
+- name: Retire the old entry
+  hosts: entry_old
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Probe the old entry
+      ansible.builtin.wait_for_connection:
+        timeout: 20
+      register: swap_entry_probe
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: Record whether the old entry is reachable
+      ansible.builtin.set_fact:
+        old_entry_reachable: "{{ swap_entry_probe is succeeded and not (swap_entry_probe.unreachable | default(false)) }}"
+
+    - name: Take a final backup, then stop the old entry
+      when: old_entry_reachable | bool
+      block:
+        - name: Run multihop-backup --force
+          ansible.builtin.command: /usr/local/sbin/multihop-backup --force
+          changed_when: true
+
+        - name: Stop and disable the backup timer
+          ansible.builtin.systemd_service:
+            name: multihop-backup.timer
+            state: stopped
+            enabled: false
+
+        - name: Stop amnezia-awg2 and multihop-uplink and keep them stopped across reboots
+          community.docker.docker_container:
+            name: "{{ item }}"
+            state: stopped
+            restart_policy: "no"
+          loop: [amnezia-awg2, multihop-uplink]
+
+- name: Rotate the entry-uplink key (old entry unreachable)
+  hosts: exit:entry
+  gather_facts: false
+  vars:
+    _old_entry_reachable: "{{ hostvars[groups['entry_old'][0]]['old_entry_reachable'] | bool }}"
+  tasks:
+    - name: Rotate the key in the vault and load it
+      ansible.builtin.include_tasks: tasks/rotate-uplink-key.yml
+      vars:
+        uplink_vault_file: "{{ hostvars[groups['exit'][0]]['inventory_dir'] }}/group_vars/all/vault_uplink.yml"
+      when: not _old_entry_reachable
+
+    - name: Warn about lost users
+      ansible.builtin.debug:
+        msg: >-
+          The old entry is unreachable: its last backup is restored.
+          Users added on the old entry after its last backup are lost.
+          A new entry-uplink key was written to
+          {{ hostvars[groups['exit'][0]]['inventory_dir'] }}/group_vars/all/vault_uplink.yml;
+          keep it, the exit now accepts only that key.
+      run_once: true
+      when: not _old_entry_reachable
+
+- name: Push the new entry-uplink key to the exit
+  hosts: exit
+  become: true
+  vars:
+    _old_entry_reachable: "{{ hostvars[groups['entry_old'][0]]['old_entry_reachable'] | bool }}"
+  tasks:
+    - name: Apply exit
+      ansible.builtin.include_role:
+        name: exit
+      when: not _old_entry_reachable
+
+- name: Deploy the new entry and restore the backup
+  ansible.builtin.import_playbook: entry.yml
+  vars:
+    entry_restore_backup: true
+
+- name: Point the entry DNS record at the new entry
+  hosts: entry
+  gather_facts: false
+  vars:
+    dns_record: "{{ entry_domain }}"
+    dns_ip: "{{ ansible_host | default(inventory_hostname) }}"
+  tasks:
+    - name: Update DNS
+      ansible.builtin.include_role:
+        name: dns_update
+
+- name: Verify
+  ansible.builtin.import_playbook: verify.yml

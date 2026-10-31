@@ -1,0 +1,30 @@
+---
+- name: Deploy the exit server
+  hosts: exit
+  become: true
+  roles:
+    - role: common
+      vars:
+        # The exit's AWG port must pass the INPUT firewall.
+        common_input_udp_ports: ["{{ exit_awg_port }}"]
+    - role: exit
+  post_tasks:
+    - name: Look up multihop-exit
+      community.docker.docker_container_info:
+        name: multihop-exit
+      register: exit_container_info
+
+    - name: Assert multihop-exit is running
+      ansible.builtin.assert:
+        that: exit_container_info.exists and exit_container_info.container.State.Running
+        fail_msg: "multihop-exit is not running; see: docker logs multihop-exit"
+        quiet: true
+
+    - name: Wait until the exit listens on its AWG port
+      ansible.builtin.command:
+        argv: [ss, -Hlun, "sport = :{{ exit_awg_port }}"]
+      register: exit_listen
+      until: exit_listen.stdout | trim | length > 0
+      retries: 6
+      delay: 5
+      changed_when: false

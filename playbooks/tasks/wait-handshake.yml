@@ -1,0 +1,29 @@
+---
+# Wait until an AWG interface has a handshake younger than 180 s
+# (latest-handshakes prints epoch seconds per peer; 0 means never).
+# Inputs (defaults: the entry's uplink):
+#   wait_handshake_container  multihop-uplink
+#   wait_handshake_iface      awg-uplink
+#   wait_handshake_endpoint   if set, also require this peer endpoint IP
+#   wait_handshake_retries    6 (10 s apart)
+- name: Wait for a handshake younger than 180 s on {{ wait_handshake_iface | default('awg-uplink') }}
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      show() { docker exec "$CONTAINER" awg show "$IFACE" "$1"; }
+      if [ -n "$ENDPOINT" ] && ! show endpoints | awk '{print $2}' | grep -qF "$ENDPOINT:"; then
+        echo "peer endpoint is not $ENDPOINT yet" >&2
+        exit 1
+      fi
+      latest=$(show latest-handshakes | awk '{print $2}' | sort -n | tail -n 1)
+      echo $(( $(date +%s) - ${latest:-0} ))
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ wait_handshake_container | default('multihop-uplink') }}"
+    IFACE: "{{ wait_handshake_iface | default('awg-uplink') }}"
+    ENDPOINT: "{{ wait_handshake_endpoint | default('') }}"
+  register: wait_handshake_age
+  until: wait_handshake_age.rc == 0 and (wait_handshake_age.stdout | int) < 180
+  retries: "{{ wait_handshake_retries | default(6) }}"
+  delay: 10
+  changed_when: false

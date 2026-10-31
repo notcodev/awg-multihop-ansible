@@ -1,0 +1,14 @@
+---
+- name: Take an on-demand backup of the entry
+  hosts: entry
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run multihop-backup --force
+      ansible.builtin.command: /usr/local/sbin/multihop-backup --force
+      register: backup_run
+      changed_when: true
+
+    - name: Show the backup output
+      ansible.builtin.debug:
+        msg: "{{ backup_run.stdout_lines + backup_run.stderr_lines }}"

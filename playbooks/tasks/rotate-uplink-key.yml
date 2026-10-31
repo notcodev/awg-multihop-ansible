@@ -1,0 +1,40 @@
+---
+# Generate a new entry-uplink keypair straight into an encrypted vault file,
+# then load it so the rest of this run (exit role, entry roles) uses it.
+#
+# Input: uplink_vault_file  absolute path of <inventory>/group_vars/all/vault_uplink.yml
+# ansible-vault runs in the directory and environment ansible-playbook was
+# started with, so it finds the same ansible.cfg / ANSIBLE_VAULT_PASSWORD_FILE.
+# The plaintext key only ever travels through a pipe; it never touches disk.
+- name: Rotate the entry-uplink key
+  vars:
+    _rotate_tmp: "{{ uplink_vault_file }}.new"
+  block:
+    - name: Generate and encrypt a new entry-uplink keypair
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail; umask 077;
+          {{ ansible_playbook_python | quote }} {{ ((playbook_dir | dirname) ~ '/scripts/gen-secrets.py') | quote }} uplink-key
+          | ansible-vault encrypt --output {{ _rotate_tmp | quote }}
+          && mv {{ _rotate_tmp | quote }} {{ uplink_vault_file | quote }}
+        executable: /bin/bash
+        # Local tasks run in the playbook dir by default; use the directory
+        # ansible-playbook was started from instead.
+        chdir: "{{ lookup('ansible.builtin.env', 'PWD') | default(playbook_dir | dirname, true) }}"
+      changed_when: true
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+  always:
+    - name: Remove a half-written vault file
+      ansible.builtin.file:
+        path: "{{ _rotate_tmp }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+- name: Load the new entry-uplink key
+  ansible.builtin.include_vars:
+    file: "{{ uplink_vault_file }}"

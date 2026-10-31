@@ -1,0 +1,70 @@
+---
+# Runs on the entry. Proves user traffic leaves through the exit:
+#   1. the uplink handshake is fresh;
+#   2. a request from inside amnezia-awg2 raises the exit's tunnel byte counters;
+#   3. (verify_compare_ips, default true) the echoed IPv4 is the exit's public
+#      IPv4, so facts must have been gathered on the exit (verify.yml does).
+# Inputs: verify_ip_echo_url (default https://api.ipify.org),
+#         verify_compare_ips, wait_handshake_retries.
+- name: Wait for a fresh uplink handshake
+  ansible.builtin.import_tasks: wait-handshake.yml
+
+- name: Check egress through the exit
+  vars:
+    _verify_exit_host: "{{ groups['exit'][0] }}"
+    _verify_exit_bytes_cmd: >-
+      set -o pipefail;
+      docker exec multihop-exit awg show awg-exit transfer
+      | awk '{ s += $2 + $3 } END { print s + 0 }'
+  block:
+    - name: Read the exit tunnel byte counters (before)
+      ansible.builtin.shell:
+        cmd: "{{ _verify_exit_bytes_cmd }}"
+        executable: /bin/bash
+      register: verify_exit_bytes_before
+      changed_when: false
+      delegate_to: "{{ _verify_exit_host }}"
+
+    - name: Ask the IP echo service from inside amnezia-awg2
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - amnezia-awg2
+          - curl
+          - "-4"
+          - "-s"
+          - --max-time
+          - "10"
+          - "{{ verify_ip_echo_url | default('https://api.ipify.org') }}"
+      register: verify_echo
+      changed_when: false
+
+    - name: Read the exit tunnel byte counters (after)
+      ansible.builtin.shell:
+        cmd: "{{ _verify_exit_bytes_cmd }}"
+        executable: /bin/bash
+      register: verify_exit_bytes_after
+      changed_when: false
+      delegate_to: "{{ _verify_exit_host }}"
+
+    - name: Assert the request went through the exit tunnel
+      ansible.builtin.assert:
+        that: (verify_exit_bytes_after.stdout | int) > (verify_exit_bytes_before.stdout | int)
+        fail_msg: >-
+          The exit's awg-exit byte counters did not grow
+          ({{ verify_exit_bytes_before.stdout }} -> {{ verify_exit_bytes_after.stdout }})
+          while amnezia-awg2 fetched {{ verify_ip_echo_url | default('https://api.ipify.org') }}.
+        quiet: true
+
+    - name: Assert the entry egresses with the exit's public IPv4
+      ansible.builtin.assert:
+        that:
+          - hostvars[_verify_exit_host].ansible_default_ipv4.address is defined
+          - verify_echo.stdout | trim == hostvars[_verify_exit_host].ansible_default_ipv4.address
+        fail_msg: >-
+          amnezia-awg2 egresses as '{{ verify_echo.stdout | trim }}', expected the exit's
+          public IPv4 '{{ hostvars[_verify_exit_host].ansible_default_ipv4.address | default('unknown: gather facts on exit') }}'.
+          Set verify_compare_ips=false if the exit's public address is not on its default interface (NAT).
+        quiet: true
+      when: verify_compare_ips | default(true) | bool
