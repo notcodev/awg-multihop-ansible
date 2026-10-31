@@ -41,12 +41,25 @@ install_chain() {
   iptables -t "$t" -E "$new" "$c"
 }
 
-up() {
-  install_chain filter DOCKER-USER MULTIHOP-FWD <<RULES
+# Destinations users must not reach through the exit: link-local (the
+# provider's metadata service) and private/CGNAT ranges (provider networks).
+# The exit's own uplink address is local (INPUT), never forwarded.
+BLOCKED_NETS="169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
+
+fwd_rules() {
+  local net
+  for net in $BLOCKED_NETS; do
+    echo "-i $EXIT_IFACE -d $net -j DROP"
+  done
+  cat <<RULES
 -i $EXIT_IFACE -o $PUBLIC_IFACE -j ACCEPT
 -i $PUBLIC_IFACE -o $EXIT_IFACE -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 -i $EXIT_IFACE -j DROP
 RULES
+}
+
+up() {
+  fwd_rules | install_chain filter DOCKER-USER MULTIHOP-FWD
   install_chain nat POSTROUTING MULTIHOP-NAT <<RULES
 -s $UPLINK_SUBNET -o $PUBLIC_IFACE -j MASQUERADE
 RULES

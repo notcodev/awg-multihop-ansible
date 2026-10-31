@@ -99,3 +99,18 @@ STUB
   [ ! -s "$IPT_DIR/mangle.FORWARD" ]
   [ ! -f "$IPT_DIR/filter.MULTIHOP-FWD" ]
 }
+
+# Users must not reach the exit provider's metadata service or private
+# networks through the exit (only the public internet).
+@test "private and metadata destinations from awg-exit are dropped before the accept" {
+  run_script multihop-exit-net up
+  [ "$status" -eq 0 ]
+  f="$IPT_DIR/filter.MULTIHOP-FWD"
+  accept=$(grep -n -x -e '-i awg-exit -o eth9 -j ACCEPT' "$f" | cut -d: -f1)
+  [ -n "$accept" ]
+  for net in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+    drop=$(grep -n -x -e "-i awg-exit -d $net -j DROP" "$f" | cut -d: -f1)
+    [ -n "$drop" ]
+    [ "$drop" -lt "$accept" ]
+  done
+}
