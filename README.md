@@ -185,6 +185,8 @@ curl -s https://hub.docker.com/v2/repositories/amneziavpn/amneziawg-go/tags/late
 
 Put the `sha256:...` value into `vars.yml` and re-run `exit.yml` and `entry.yml`.
 
+The image is published for `linux/amd64` only (checked 2026-10-31: no tag has an arm64 build), so both servers must be x86_64.
+
 ## Troubleshooting
 
 On the entry:

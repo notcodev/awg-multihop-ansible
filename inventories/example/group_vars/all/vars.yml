@@ -11,7 +11,7 @@ extra_input_tcp_ports: []
 entry_awg_subnet: 10.8.1.0/24
 uplink_subnet: 10.9.0.0/30
 uplink_mtu: 1280
-awg_base_image_digest: sha256:CHANGE_ME
+awg_base_image_digest: sha256:cbafc02b8373a83f428272db6d8001b37bc02e6211cbd8c0cb4e2e3759b12b72
 
 # split routing
 split_routing_enabled: true
