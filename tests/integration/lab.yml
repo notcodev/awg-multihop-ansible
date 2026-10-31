@@ -1,6 +1,6 @@
 ---
 # Lab-only helpers for tests/integration/run.sh. Never part of a real deploy.
-#   --tags pin     exit_domain -> exit IP in the entry's /etc/hosts (dns_update, hostsfile)
+#   --tags pin     exit_domain and entry_domain pinned via the hostsfile DNS backend
 #   --tags tools   tcpdump/conntrack on the hosts the checks inspect
 #   --tags client  test VPN client on lab_client, its peer added on the entry like the app does
 
@@ -10,6 +10,18 @@
   tags: [pin]
   vars:
     dns_record: "{{ exit_domain }}"
+    dns_ip: "{{ ansible_host }}"
+  tasks:
+    - name: Update DNS
+      ansible.builtin.include_role:
+        name: dns_update
+
+- name: Pin the entry domain (on the entry and the VPN client hosts)
+  hosts: entry
+  gather_facts: false
+  tags: [pin, client]
+  vars:
+    dns_record: "{{ entry_domain }}"
     dns_ip: "{{ ansible_host }}"
   tasks:
     - name: Update DNS
@@ -31,8 +43,6 @@
   hosts: lab_client
   become: true
   tags: [client]
-  vars:
-    _entry: "{{ groups['entry'][0] }}"
   tasks:
     - name: Install docker
       ansible.builtin.apt:
@@ -57,8 +67,6 @@
         src: templates/client.conf.j2
         dest: /var/lib/multihop-lab/client/lab0.conf
         mode: "0600"
-      vars:
-        lab_entry_ip: "{{ hostvars[_entry].ansible_host }}"
       register: lab_client_conf
 
     # No PersistentKeepalive: the idle check needs a silent client.
@@ -78,6 +86,9 @@
         command: ["apk add --no-cache curl netcat-openbsd >/dev/null && awg-quick up /etc/amnezia/lab0.conf && exec sleep infinity"]
         volumes:
           - /var/lib/multihop-lab/client/lab0.conf:/etc/amnezia/lab0.conf:ro
+          # Endpoint is entry_domain, resolved from the host's pinned /etc/hosts
+          # when the tunnel comes up (a restart = the app reconnecting).
+          - /etc/hosts:/etc/hosts:ro
 
 - name: Add the client as a user, the way the Amnezia app does
   hosts: entry

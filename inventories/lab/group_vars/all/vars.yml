@@ -9,6 +9,8 @@
 entry_domain: entry.multihop.test
 exit_domain: exit.multihop.test
 dns_backend: hostsfile
+# the test VPN client resolves entry_domain too (it connects by name)
+dns_hostsfile_hosts: "{{ (groups['entry'] | default([])) + (groups['lab_client'] | default([])) }}"
 ssh_port: 22
 
 # addressing and image

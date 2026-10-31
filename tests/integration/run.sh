@@ -8,6 +8,8 @@
 #   run.sh deploy          exit pin + tools, site.yml, test VPN client
 #   run.sh check [NAME..]  run checks (default: all, in order), print PASS/FAIL
 #   run.sh swap            exit swap to EXIT2 (run last), then its checks
+#   run.sh swap-entry reachable|unreachable|restore
+#                          entry swap to ENTRY2_IP and back (after `swap`)
 #   run.sh clean           remove what the test created on the hosts (optional;
 #                          the hosts are throwaway and deleted by their owner)
 #
@@ -606,14 +608,28 @@ ck_backup() { # brief 3.7
   fi
 }
 
-ck_drift() { # brief 3.8 / Review Focus 5
-  local p st drift msg pub live
+image_label() { # label of the image amnezia-awg2 runs ('' if none)
+  on "$ENTRY_IP" 'img=$(docker inspect -f "{{.Image}}" amnezia-awg2) && docker image inspect -f "{{index .Config.Labels \"org.multihop.build\"}}" "$img"' 2>/dev/null
+}
+
+ck_drift() { # brief 3.8 / Review Focus 5, as a real app reinstall
+  # The app reinstall: remove the image, rebuild amnezia-awg2 from the
+  # upstream Dockerfile (upstream base, its start.sh without our UDP port
+  # exclusion; legacy builder, as the app gets on a host without buildx) and
+  # run it without the bind mount. restore.yml must rebuild OUR image.
+  local p st drift msg pub live before after
   s3_ready drift || return
   p=$(P)
   pub=$(client_pub)
-  on "$ENTRY_IP" "docker rm -f amnezia-awg2 >/dev/null && docker run -d --name amnezia-awg2 --restart always --privileged \
-      --cap-add NET_ADMIN --cap-add SYS_MODULE -p $p:$p/udp -v /lib/modules:/lib/modules amnezia-awg2 >/dev/null \
-      && docker network connect amnezia-dns-net amnezia-awg2"
+  on "$ENTRY_IP" "set -e; d=/var/tmp/app-reinstall; rm -rf \$d; mkdir -p \$d
+    sed 's#^FROM .*#FROM amneziavpn/amneziawg-go:latest#' /var/lib/multihop/entry-app-build/Dockerfile > \$d/Dockerfile
+    grep -v -- '--to-ports' /var/lib/multihop/entry-app-build/start.sh > \$d/start.sh
+    docker rm -f amnezia-awg2 >/dev/null; docker rmi amnezia-awg2 >/dev/null
+    DOCKER_BUILDKIT=0 docker build -q --pull -t amnezia-awg2 \$d >/dev/null 2>&1
+    docker run -d --name amnezia-awg2 --restart always --privileged --cap-add NET_ADMIN --cap-add SYS_MODULE \
+      -p $p:$p/udp -v /lib/modules:/lib/modules amnezia-awg2 >/dev/null
+    docker network connect amnezia-dns-net amnezia-awg2; rm -rf \$d"
+  before=$(image_label)
   on "$ENTRY_IP" systemctl start multihop-backup 2>/dev/null
   st=$(on "$ENTRY_IP" systemctl show -P ExecMainStatus multihop-backup)
   drift=$(on "$ENTRY_IP" 'test -f /var/lib/multihop/backup/DRIFT && echo DRIFT')
@@ -622,18 +638,65 @@ ck_drift() { # brief 3.8 / Review Focus 5
   if ! ap drift-restore playbooks/restore.yml -e confirm=yes; then
     result FAIL drift "backup exit=$st $drift; entry.yml msg '$msg'; restore.yml failed, see $LOGS/drift-restore.log"; return
   fi
+  after=$(image_label)
+  # The simulated app left the upstream tag behind; the real app would too.
+  on "$ENTRY_IP" 'docker rmi amneziavpn/amneziawg-go:latest >/dev/null 2>&1; true'
   live=$(on "$ENTRY_IP" "docker exec amnezia-awg2 awg show awg0 allowed-ips" | grep -F "$pub")
   if [ "$st" = 2 ] && [ "$drift" = DRIFT ] && [ "$(recap drift-entry entry1 failed)" = 1 ] && [ -n "$msg" ] \
+     && [ -z "$before" ] && [[ "$after" =~ ^[0-9a-f]{64}$ ]] \
      && [ -n "$live" ] && ap drift-verify playbooks/verify.yml && wait_client; then
-    result PASS drift "backup exit=2 + DRIFT; entry.yml failed naming '$msg'; restore.yml ok, peer back ($live); verify ok; client back"
+    result PASS drift "app-reinstalled image (label '$before') without mount: backup exit=2 + DRIFT; entry.yml failed naming '$msg'; restore.yml rebuilt our image (label ${after:0:12}...), peer back ($live); verify ok (incl. to_ports=2, label); client back"
   else
-    result FAIL drift "backup exit=$st '$drift'; entry.yml failed=$(recap drift-entry entry1 failed) msg='$msg'; peer='$live'"
+    result FAIL drift "label before '$before' after '$after'; backup exit=$st '$drift'; entry.yml failed=$(recap drift-entry entry1 failed) msg='$msg'; peer='$live'"
+  fi
+}
+
+ck_exit_docker_restart() { # exit forwarding survives `systemctl stop docker; systemctl start docker`
+  local st
+  st=$(on "$EXIT_NOW" 'systemctl stop docker docker.socket; systemctl start docker
+    for _ in $(seq 1 30); do systemctl is-active -q multihop-net && break; sleep 1; done
+    echo "multihop-net=$(systemctl is-active multihop-net) fwd=$(iptables -S MULTIHOP-FWD 2>/dev/null | grep -c -- -j) nat=$(iptables -t nat -S MULTIHOP-NAT 2>/dev/null | grep -c MASQUERADE)"')
+  if [[ "$st" == "multihop-net=active fwd="* && "$st" != *"fwd=0"* && "$st" == *"nat=1" ]] && wait_uplink && wait_client \
+     && [ "$(client_curl https://api.ipify.org)" = "$EXIT_NOW" ]; then
+    result PASS exit_docker_restart "exit after docker stop+start: $st; client egress via exit again"
+  else
+    result FAIL exit_docker_restart "exit after docker stop+start: $st"
+  fi
+}
+
+ck_client_metadata() { # the exit's provider metadata / private ranges are unreachable for users
+  local rc xif cap d0 d1
+  xif=$(pubif "$EXIT_NOW")
+  d0=$(on "$EXIT_NOW" "iptables -nvxL MULTIHOP-FWD | awk '/169.254.0.0\/16/ { print \$1 }'")
+  capture "$EXIT_NOW" 15 "$xif" 'host 169.254.169.254' > "$STATE/cap-md" &
+  listening "$STATE/cap-md"
+  client_curl -o /dev/null --max-time 6 http://169.254.169.254/; rc=$?
+  wait
+  d1=$(on "$EXIT_NOW" "iptables -nvxL MULTIHOP-FWD | awk '/169.254.0.0\/16/ { print \$1 }'")
+  cap=$(pkts "$STATE/cap-md")
+  if [ "$rc" -ne 0 ] && [ "$cap" = 0 ] && [ "${d1:-0}" -gt "${d0:-0}" ] 2>/dev/null; then
+    result PASS client_metadata "client -> 169.254.169.254: curl rc=$rc; exit $xif pkts=0; exit 169.254/16 DROP $d0 -> $d1"
+  else
+    result FAIL client_metadata "curl rc=$rc; exit $xif pkts=$cap; DROP $d0 -> $d1"
+  fi
+}
+
+ck_docker_blocked() { # Docker must not start on the entry when the entry rules cannot be applied
+  local st
+  st=$(on "$ENTRY_IP" 'chmod -x /usr/local/sbin/multihop-entry-net; systemctl restart docker 2>/dev/null; rc=$?
+    echo "restart_rc=$rc docker=$(systemctl is-active docker) app=$(docker inspect -f {{.State.Running}} amnezia-awg2 2>/dev/null || echo none)"
+    chmod +x /usr/local/sbin/multihop-entry-net; systemctl start docker')
+  if [[ "$st" == *"docker=failed"* || "$st" == *"docker=inactive"* ]] && [[ "$st" != *"app=true"* ]] \
+     && [[ "$st" != *"restart_rc=0"* ]] && wait_uplink && wait_client; then
+    result PASS docker_blocked "multihop-entry-net not runnable: $st; after fixing it Docker and the client are back"
+  else
+    result FAIL docker_blocked "$st"
   fi
 }
 
 CHECKS="first_run_reload images_clean to_ports idempotent peer_kept client_via_exit client_direct
 client_udp_sport client_fail_closed client_private_net idle_reply group_heal verify_fail_closed docker_restart reboot
-container_direct backup drift"
+container_direct client_metadata exit_docker_restart docker_blocked backup drift"
 
 cmd_check() {
   need ENTRY_IP EXIT_IP CLIENT_IP
@@ -686,8 +749,125 @@ cmd_clean() {
   done
 }
 
+# ----------------------------------------------------------------------------
+# entry swap (both branches). ENTRY2_IP is the other entry host; the VPN client
+# runs on EXIT2_IP meanwhile and connects by entry_domain (hostsfile pin).
+
+retire_host() { # retire_host <ip>: remove every multihop role and the lab client from a host
+  on "$1" 'docker rm -f amnezia-awg2 multihop-uplink multihop-exit lab-client >/dev/null 2>&1
+    systemctl disable --now multihop-backup.timer multihop-reresolve.timer multihop-split-refresh.timer >/dev/null 2>&1
+    systemctl stop multihop-net 2>/dev/null
+    for s in multihop-exit-net multihop-entry-net; do [ -x /usr/local/sbin/$s ] && /usr/local/sbin/$s down; done
+    systemctl disable multihop-net >/dev/null 2>&1
+    rm -f /etc/systemd/system/multihop-net.service /etc/systemd/system/docker.service.d/multihop.conf \
+      /etc/udev/rules.d/90-multihop-public-group.rules /usr/local/sbin/multihop-*
+    rm -rf /var/lib/multihop /var/lib/multihop-lab /etc/multihop
+    ip -o link show | awk -F": " "/group 51820/ {print \$2}" | while read -r i; do ip link set dev "$i" group default; done
+    docker rmi amnezia-awg2 >/dev/null 2>&1
+    systemctl daemon-reload; systemctl restart docker; echo "retired $(hostname)"'
+}
+
+write_hosts_entry_swap() { # <entry host> <entry_old host or ""> [<ansible_host override for entry2>]
+  local e2="${3:-$ENTRY2_IP}" old=""
+  [ -n "$2" ] && old="{hosts: {$2: {}}}"
+  cat > "$INV/hosts.yml" <<EOF
+---
+# Generated by tests/integration/run.sh (entry swap). Do not commit.
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: $SSH_KEY
+    ansible_ssh_common_args: -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=yes
+  hosts:
+    entry1: {ansible_host: $ENTRY_IP}
+    entry2: {ansible_host: $e2}
+    exit2: {ansible_host: $EXIT2_IP}
+  children:
+    entry: {hosts: {$1: {}}}
+    entry_old: ${old:-"{}"}
+    exit: {hosts: {exit2: {}}}
+    exit_old: {}
+    lab_client: {hosts: {exit2: {}}}
+EOF
+}
+
+uplink_pub() { # public key in the lab vault_uplink.yml (not secret)
+  uv run ansible-vault view "$INV/group_vars/all/vault_uplink.yml" 2>/dev/null | awk '$1 == "public_key:" { print $2 }'
+}
+
+client_on() { # client_on <entry ip>: restart the client (reconnect = re-resolve) and check where it goes
+  local ep ip
+  on "$CLIENT_IP" 'docker restart lab-client >/dev/null'
+  wait_client || return 1
+  ep=$(client awg show lab0 endpoints | awk '{print $2}')
+  ip=$(client_curl https://api.ipify.org)
+  echo "client endpoint $ep, egress $ip"
+  [[ "$ep" == "$1:"* ]] && [ "$ip" = "$EXIT2_IP" ]
+}
+
+cmd_swap_entry() {
+  need ENTRY_IP ENTRY2_IP EXIT2_IP
+  [ -f "$STATE/swapped" ] || die "run the exit swap first (EXIT2 is the exit here)"
+  CLIENT_IP="$EXIT2_IP"
+  local pub ev ev2 fin rst a_state pin new old enc peers b_hs
+  pub=$(client_pub)
+  case "${1:-}" in
+    reachable)  # entry1 (old) -> entry2 (new)
+      log "retiring the exit role and the client on $ENTRY2_IP"; retire_host "$ENTRY2_IP"
+      write_hosts_entry_swap entry1 ""
+      ap swap-entry-client tests/integration/lab.yml --tags client || die "client on $EXIT2_IP failed"
+      wait_client || die "client on $EXIT2_IP gets no traffic"
+      write_hosts_entry_swap entry2 entry1
+      ap swap-entry-pin tests/integration/lab.yml --tags pin,tools --skip-tags client || die "pin failed"
+      if ! ap swap-entry-reachable playbooks/swap-entry.yml -e confirm=yes -v; then
+        result FAIL swap_entry_reachable "swap-entry.yml failed, see $LOGS/swap-entry-reachable.log"; return
+      fi
+      fin=$(grep -o 'uploaded [^"\\ ]*' "$LOGS/swap-entry-reachable.log" | head -n 1 | sed 's/^uploaded //')
+      rst=$(grep -o 'Restoring backup object [^"]*' "$LOGS/swap-entry-reachable.log" | head -n 1 | sed 's/^Restoring backup object //')
+      a_state=$(on "$ENTRY_IP" "docker inspect -f '{{.Name}} running={{.State.Running}} restart={{.HostConfig.RestartPolicy.Name}}' amnezia-awg2 multihop-uplink | paste -sd' ' -; systemctl is-enabled multihop-backup.timer; systemctl is-active multihop-backup.timer" | paste -sd' ' -)
+      pin=$(on "$EXIT2_IP" "grep -F entry.multihop.test /etc/hosts")
+      ev=$(on "$ENTRY2_IP" "docker exec amnezia-awg2 awg show awg0 allowed-ips" | grep -F "$pub")
+      ev2=$(client_on "$ENTRY2_IP"); local ok=$?
+      if [ -n "$fin" ] && [ "$fin" = "$rst" ] && [[ "$a_state" == *"/amnezia-awg2 running=false restart=no /multihop-uplink running=false restart=no disabled inactive"* ]] \
+         && [[ "$pin" == "$ENTRY2_IP "* ]] && [ -n "$ev" ] && [ "$ok" = 0 ]; then
+        result PASS swap_entry_reachable "final backup $fin = restored object; old entry: $a_state; pin '$pin'; app-added peer on new entry ($ev); $ev2; verify (in playbook) ok"
+      else
+        result FAIL swap_entry_reachable "final '$fin' restored '$rst'; old entry '$a_state'; pin '$pin'; peer '$ev'; $ev2"
+      fi ;;
+    unreachable)  # entry2 (old, "unreachable") -> entry1 (new); the real entry2 keeps running
+      old=$(uplink_pub)
+      write_hosts_entry_swap entry1 entry2 192.0.2.1
+      if ! ap swap-entry-unreachable playbooks/swap-entry.yml -e confirm=yes; then
+        result FAIL swap_entry_unreachable "swap-entry.yml failed, see $LOGS/swap-entry-unreachable.log"; return
+      fi
+      new=$(uplink_pub)
+      enc=$(head -c 14 "$INV/group_vars/all/vault_uplink.yml")
+      peers=$(on "$EXIT2_IP" 'docker exec multihop-exit awg show awg-exit peers' | paste -sd' ' -)
+      # The still-running old entry tries again with the old key: no handshake.
+      b_hs=$(on "$ENTRY2_IP" 'docker restart multihop-uplink >/dev/null; for _ in $(seq 1 9); do sleep 5; echo kick > /dev/udp/10.9.0.1/9 2>/dev/null; done; docker exec multihop-uplink awg show awg-uplink latest-handshakes' | awk '{print $2}')
+      pin=$(on "$EXIT2_IP" "grep -F entry.multihop.test /etc/hosts")
+      ev=$(on "$ENTRY_IP" "docker exec amnezia-awg2 awg show awg0 allowed-ips" | grep -F "$pub")
+      ev2=$(client_on "$ENTRY_IP"); local ok=$?
+      if [ "$enc" = '$ANSIBLE_VAULT' ] && [ -n "$new" ] && [ "$new" != "$old" ] && [ "$peers" = "$new" ] \
+         && [ "$b_hs" = 0 ] && [[ "$pin" == "$ENTRY_IP "* ]] && [ -n "$ev" ] && [ "$ok" = 0 ]; then
+        result PASS swap_entry_unreachable "uplink key rotated ($old -> $new, vault_uplink.yml re-encrypted); exit peers: $new only; still-running old entry (old key) after 45 s: latest-handshake 0 (rejected); pin '$pin'; peer on new entry ($ev); $ev2; verify (in playbook) ok"
+      else
+        result FAIL swap_entry_unreachable "enc '$enc'; key $old -> $new; exit peers '$peers'; old entry handshake '$b_hs'; pin '$pin'; peer '$ev'; $ev2"
+      fi ;;
+    restore)  # back to the standard lab: entry1 entry, exit2 exit, client on ENTRY2 (EXIT_IP)
+      log "retiring the old entry $ENTRY2_IP"; retire_host "$ENTRY2_IP"
+      on "$EXIT2_IP" 'docker rm -f lab-client >/dev/null 2>&1; sed -i "/entry.multihop.test/d" /etc/hosts'
+      CLIENT_IP="${LAB_CLIENT_IP:-$EXIT_IP}"
+      write_hosts exit2 exit1
+      ap swap-entry-restore tests/integration/lab.yml --tags tools,client || die "client back on $CLIENT_IP failed"
+      wait_client && log "lab restored: entry $ENTRY_IP, exit $EXIT2_IP, client $CLIENT_IP" ;;
+    *) die "usage: run.sh swap-entry reachable|unreachable|restore" ;;
+  esac
+}
+
 case "${1:-}" in
   init) cmd_init ;;
+  swap-entry) shift; cmd_swap_entry "$@" ;;
   deploy) cmd_deploy ;;
   client) cmd_client ;;
   check) shift; cmd_check "$@" ;;
