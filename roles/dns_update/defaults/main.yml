@@ -1,0 +1,7 @@
+---
+dns_backend: manual
+dns_record: ""
+dns_ip: ""
+dns_poll_retries: 60
+dns_poll_delay: 10
+dns_resolvers: ["1.1.1.1", "8.8.8.8"]

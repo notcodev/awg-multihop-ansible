@@ -1,0 +1,187 @@
+---
+# Controller-side: fetch, decrypt and validate an entry backup.
+#
+# Inputs:
+#   backup_object        optional; object name or full key. Default: content of `latest`.
+#   backup_fetch_source  optional; "local:<dir>" reads the encrypted object and `latest`
+#                        from a local directory instead of S3 (test seam).
+# Outputs (facts):
+#   entry_restore_archive  controller path of the DECRYPTED tar (contains private keys)
+#   entry_restore_tmpdir   its 0700 directory. THE CALLER MUST DELETE IT after the
+#                          restore play has used it (file: state=absent, in an `always:`).
+# The tempdir is removed here only if fetch/decrypt/validate fails.
+- name: Fetch, decrypt and validate backup
+  vars:
+    _fb_local: "{{ (backup_fetch_source | default('')) is match('^local:') }}"
+    _fb_local_dir: "{{ (backup_fetch_source | default('')) | regex_replace('^local:', '') }}"
+    _fb_s3_cmd: >-
+      aws --endpoint-url {{ backup_s3_endpoint | quote }} s3 cp
+  block:
+    - name: Create private temp dir (0700) for the decrypted archive
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: multihop-restore-
+      register: _fb_dir
+      delegate_to: localhost
+      become: false
+
+    - name: Restrict temp dir
+      ansible.builtin.file:
+        path: "{{ _fb_dir.path }}"
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Read latest pointer (S3)
+      ansible.builtin.command: "{{ _fb_s3_cmd }} s3://{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/latest -"
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ vault_backup_reader.access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ vault_backup_reader.secret_key }}"
+        AWS_DEFAULT_REGION: "{{ backup_s3_region }}"
+      register: _fb_latest_s3
+      changed_when: false
+      no_log: true
+      delegate_to: localhost
+      become: false
+      when: not _fb_local | bool and (backup_object | default('') | length == 0)
+
+    - name: Read latest pointer (local)
+      ansible.builtin.slurp:
+        src: "{{ _fb_local_dir }}/latest"
+      register: _fb_latest_local
+      delegate_to: localhost
+      become: false
+      when: _fb_local | bool and (backup_object | default('') | length == 0)
+
+    - name: Resolve object key
+      ansible.builtin.set_fact:
+        _fb_key: >-
+          {%- if backup_object | default('') | length > 0 -%}
+          {{ backup_object if '/' in backup_object else backup_s3_prefix ~ '/' ~ backup_object }}
+          {%- elif _fb_local | bool -%}
+          {{ (_fb_latest_local.content | b64decode) | trim }}
+          {%- else -%}
+          {{ _fb_latest_s3.stdout | trim }}
+          {%- endif -%}
+
+    - name: Refuse suspicious object key
+      ansible.builtin.assert:
+        that:
+          - _fb_key | length > 0
+          - "'..' not in _fb_key"
+          - _fb_key is match('^[A-Za-z0-9._/-]+$')
+        fail_msg: "Invalid backup object key '{{ _fb_key }}'"
+
+    - name: Download encrypted backup (S3)
+      ansible.builtin.command: "{{ _fb_s3_cmd }} s3://{{ backup_s3_bucket }}/{{ _fb_key }} {{ (_fb_dir.path ~ '/backup.tar.age') | quote }}"
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ vault_backup_reader.access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ vault_backup_reader.secret_key }}"
+        AWS_DEFAULT_REGION: "{{ backup_s3_region }}"
+      changed_when: true
+      no_log: true
+      delegate_to: localhost
+      become: false
+      when: not _fb_local | bool
+
+    - name: Copy encrypted backup (local source)
+      ansible.builtin.copy:
+        src: "{{ _fb_local_dir }}/{{ _fb_key | basename }}"
+        dest: "{{ _fb_dir.path }}/backup.tar.age"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: _fb_local | bool
+
+    - name: Write age identity to a 0600 temp file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: multihop-age-id-
+      register: _fb_id
+      delegate_to: localhost
+      become: false
+
+    - name: Store age identity
+      ansible.builtin.copy:
+        content: "{{ vault_backup_age_identity }}\n"
+        dest: "{{ _fb_id.path }}"
+        mode: "0600"
+      no_log: true
+      delegate_to: localhost
+      become: false
+
+    - name: Decrypt
+      ansible.builtin.command:
+        argv: [age, -d, -i, "{{ _fb_id.path }}", -o, "{{ _fb_dir.path }}/backup.tar", "{{ _fb_dir.path }}/backup.tar.age"]
+      changed_when: true
+      delegate_to: localhost
+      become: false
+
+    - name: Delete encrypted copy
+      ansible.builtin.file:
+        path: "{{ _fb_dir.path }}/backup.tar.age"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    - name: List archive members
+      ansible.builtin.command:
+        argv: [tar, -tf, "{{ _fb_dir.path }}/backup.tar"]
+      register: _fb_members
+      changed_when: false
+      delegate_to: localhost
+      become: false
+
+    - name: Validate archive has the required state files at its root
+      ansible.builtin.assert:
+        that:
+          - _fb_members.stdout_lines | map('regex_replace', '^\./', '') | list is superset(['awg0.conf', 'wireguard_server_private_key.key'])
+        fail_msg: >-
+          Backup {{ _fb_key }} is not a valid entry backup: it must contain ./awg0.conf and
+          ./wireguard_server_private_key.key at the archive root.
+
+    - name: Read server private key from the backup
+      ansible.builtin.command:
+        argv: [tar, -xOf, "{{ _fb_dir.path }}/backup.tar", ./wireguard_server_private_key.key]
+      register: _fb_key_in_backup
+      changed_when: false
+      failed_when: false
+      no_log: true
+      delegate_to: localhost
+      become: false
+
+    - name: Expose restore archive
+      ansible.builtin.set_fact:
+        entry_restore_archive: "{{ _fb_dir.path }}/backup.tar"
+        entry_restore_tmpdir: "{{ _fb_dir.path }}"
+
+    - name: Warn if the backup identity differs from the vault identity
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the server private key in backup {{ _fb_key }} differs from
+          vault_entry_awg.private_key. The backup wins; update the vault if you want them to agree.
+      when:
+        - vault_entry_awg.private_key is defined
+        - _fb_key_in_backup.stdout | default('') | trim != vault_entry_awg.private_key | trim
+
+  rescue:
+    - name: Remove temp dir after failure
+      ansible.builtin.file:
+        path: "{{ _fb_dir.path }}"
+        state: absent
+      when: _fb_dir is defined and _fb_dir.path is defined
+      delegate_to: localhost
+      become: false
+
+    - name: Fail
+      ansible.builtin.fail:
+        msg: "Fetching backup failed: {{ ansible_failed_result.msg | default('see above') }}"
+
+  always:
+    - name: Remove age identity temp file
+      ansible.builtin.file:
+        path: "{{ _fb_id.path }}"
+        state: absent
+      when: _fb_id is defined and _fb_id.path is defined
+      delegate_to: localhost
+      become: false

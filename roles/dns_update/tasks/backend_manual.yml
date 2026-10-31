@@ -1,0 +1,6 @@
+---
+- name: Ask the owner to update the DNS record
+  ansible.builtin.pause:
+    prompt: "Point {{ dns_record }} A record to {{ dns_ip }} (TTL 60-300), then press Enter"
+  delegate_to: localhost
+  run_once: true

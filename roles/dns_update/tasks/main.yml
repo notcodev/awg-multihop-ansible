@@ -1,0 +1,23 @@
+---
+- name: Check dns_update inputs
+  ansible.builtin.assert:
+    that:
+      - dns_record | length > 0
+      - dns_ip | length > 0
+
+- name: Update DNS record via backend
+  ansible.builtin.include_tasks: "backend_{{ dns_backend }}.yml"
+  run_once: true
+
+- name: Wait until public resolvers return the new IP
+  ansible.builtin.command:
+    argv: [dig, +short, "{{ dns_record }}", "@{{ item }}"]
+  loop: "{{ dns_resolvers }}"
+  register: dns_update_dig
+  until: dns_ip in dns_update_dig.stdout_lines
+  retries: "{{ dns_poll_retries }}"
+  delay: "{{ dns_poll_delay }}"
+  changed_when: false
+  delegate_to: localhost
+  become: false
+  run_once: true
