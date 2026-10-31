@@ -214,11 +214,7 @@ PY
 cmd_deploy() {
   need ENTRY_IP EXIT_IP
   ap lab-pre tests/integration/lab.yml --tags pin,tools || die "lab.yml (pin,tools) failed, see $LOGS/lab-pre.log"
-  ap site playbooks/site.yml
-  local rc=$?
-  # Keep the first run's log: it is the only one where handlers meet inactive units.
-  [ -f "$LOGS/site-first.log" ] || cp "$LOGS/site.log" "$LOGS/site-first.log"
-  [ "$rc" = 0 ] || die "site.yml failed, see $LOGS/site.log"
+  ap site playbooks/site.yml || die "site.yml failed, see $LOGS/site.log"
   log "site.yml OK (includes verify.yml)"
   cmd_client
 }
@@ -320,8 +316,9 @@ wait_ssh_cycle() { # wait until <ip> went away (if expected) and is back
 # checks (stateful; the default order is the order below)
 
 ck_first_run_reload() { # [log name]: handlers with state: reloaded on a unit not yet started
-  local f="$LOGS/${1:-site-first}.log" ev
-  [ -f "$f" ] || { result SKIP first_run_reload "no $f (first deploy log not kept)"; return; }
+  # The exit swap's log is the first exit.yml on a fresh host (EXIT2).
+  local f="$LOGS/${1:-swap}.log" ev
+  [ -f "$f" ] || { result SKIP first_run_reload "no $f (run the exit swap: its exit.yml is a first run)"; return; }
   ev=$(awk '/^RUNNING HANDLER \[.*Reload multihop-(input-fw|net)\]/ { h = $0; getline; while ($0 ~ /^$/) getline; print h " => " $1 }' "$f" | sed 's/ \*\**//')
   if [ -n "$ev" ] && ! grep -q 'fatal' <<<"$ev"; then
     result PASS first_run_reload "$(tr '\n' ';' <<<"$ev")"
