@@ -5,8 +5,12 @@
 # Traffic from a bridge is routed (ip rule priorities):
 #   10100  carries the direct mark 0x5a/0xff      -> main (split routing)
 #   10110  carries the reply mark 0x5b00/0xff00    -> main (AWG replies)
-#   10120  anything, main minus its default route  -> main (local/bridge nets)
+#   10120  anything, main minus its default route and minus every route via
+#          the public interface                    -> main (local/bridge nets)
 #   10130  everything else                         -> table 51820
+# 10120 suppresses routes through PUBLIC_IFACE by putting that interface in
+# its own interface group (PUBLIC_GROUP): providers install DHCP host routes
+# via it (e.g. to their resolvers), which bridge traffic must not take.
 # Table 51820 holds `default dev awg-uplink` (added by the uplink container)
 # and a blackhole default, so with the uplink down traffic is dropped.
 # MULTIHOP-FWD (from DOCKER-USER) is the backstop: bridge -> public interface
@@ -48,6 +52,7 @@ AWG_UDP="-p udp --sport $ENTRY_AWG_PORT"
 DIRECT_SET=multihop_direct
 FORCE_EXIT_SET=multihop_force_exit
 RULE_PREFS="10100 10110 10120 10130"
+PUBLIC_GROUP=51820
 
 # drop_chain <table> <parent> <chain>: remove every jump from the parent to
 # the chain (whatever its match), then flush and delete the chain if present.
@@ -125,7 +130,9 @@ rule_selectors() {
   case "$1" in
     10100) echo "fwmark $DIRECT_MARK lookup main" ;;
     10110) echo "fwmark $REPLY_MARK lookup main" ;;
-    10120) for br in $BRIDGES; do echo "iif $br lookup main suppress_prefixlength 0"; done ;;
+    10120) for br in $BRIDGES; do
+             echo "iif $br lookup main suppress_prefixlength 0 suppress_ifgroup $PUBLIC_GROUP"
+           done ;;
     10130) for br in $BRIDGES; do echo "iif $br lookup $TABLE"; done ;;
   esac
 }
@@ -190,8 +197,12 @@ RULES
 RULES
 
   # 3. Blackhole before any rule points at the table (an empty table would
-  #    fall through to main), then the rules.
+  #    fall through to main), the public interface's group before the rule
+  #    that suppresses it, then the rules. A missing interface (not up yet)
+  #    only loses the group: its routes then hit the FWD backstop (dropped).
   ip route replace blackhole default metric 4096 table "$TABLE"
+  ip link set dev "$PUBLIC_IFACE" group "$PUBLIC_GROUP" \
+    || echo "${0##*/}: cannot set the group of $PUBLIC_IFACE; bridge traffic to its non-default routes is dropped" >&2
   install_rules
 }
 
@@ -204,6 +215,7 @@ down() {
     del_pref $((p + 1))
   done
   ip route del blackhole default metric 4096 table "$TABLE" 2>/dev/null || true
+  ip link set dev "$PUBLIC_IFACE" group default 2>/dev/null || true
   local spec
   for spec in "mangle PREROUTING MULTIHOP-MARK" "nat POSTROUTING MULTIHOP-NAT" \
               "mangle FORWARD MULTIHOP-MSS" "filter DOCKER-USER MULTIHOP-FWD"; do

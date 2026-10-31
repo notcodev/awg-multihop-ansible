@@ -88,6 +88,9 @@ case "$1 $2" in
   "route del")
     shift 2; line="$*"; grep -qxF -e "$line" "$d/routes" || exit 2
     grep -vxF -e "$line" "$d/routes" > "$d/routes.t"; mv "$d/routes.t" "$d/routes" ;;
+  "link set")
+    [ "$3 $5" = "dev group" ] || exit 9
+    echo "$4 group $6" > "$d/link.$4" ;;
   *) exit 9 ;;
 esac
 STUB
@@ -104,8 +107,8 @@ expected_rules() {
   cat <<'R'
 10100 fwmark 0x5a/0xff lookup main
 10110 fwmark 0x5b00/0xff00 lookup main
-10120 iif docker0 lookup main suppress_prefixlength 0
-10120 iif amn0 lookup main suppress_prefixlength 0
+10120 iif docker0 lookup main suppress_prefixlength 0 suppress_ifgroup 51820
+10120 iif amn0 lookup main suppress_prefixlength 0 suppress_ifgroup 51820
 10130 iif docker0 lookup 51820
 10130 iif amn0 lookup 51820
 R
@@ -130,6 +133,30 @@ snapshot() {
 }
 
 @test "rules have priorities 10100..10130 for both bridges" {
+  run_script multihop-entry-net up
+  [ "$status" -eq 0 ]
+  diff <(sort -s -n -k1,1 "$IP_DIR/rules") <(expected_rules)
+}
+
+# Providers install DHCP host routes (e.g. to their resolvers) via the public
+# interface; bridge traffic must not take them (dropped by the backstop, so
+# DNS from containers failed) but go through the uplink like the default route.
+@test "bridge traffic never takes a main route via the public interface" {
+  run_script multihop-entry-net up
+  [ "$status" -eq 0 ]
+  [ "$(cat "$IP_DIR/link.eth9")" = "eth9 group 51820" ]
+  grp=$(first_line '^ip link set dev eth9 group 51820$')
+  r=$(first_line '^ip rule add pref 10120 .*suppress_ifgroup 51820$')
+  [ -n "$grp" ] && [ -n "$r" ] && [ "$grp" -lt "$r" ]
+}
+
+@test "a missing public interface does not stop the rules" {
+  cat > "$BATS_TEST_TMPDIR/bin/ip.real" < "$BATS_TEST_TMPDIR/bin/ip"
+  cat > "$BATS_TEST_TMPDIR/bin/ip" <<STUB
+#!/bin/sh
+[ "\$1 \$2" = "link set" ] && { echo "ip \$*" >> "\$STUB_LOG"; echo 'Cannot find device "eth9"' >&2; exit 1; }
+exec sh "$BATS_TEST_TMPDIR/bin/ip.real" "\$@"
+STUB
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") <(expected_rules)
@@ -312,7 +339,7 @@ ENV
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") - <<'R'
 10100 fwmark 0x5a/0xff lookup main
 10110 fwmark 0x5b00/0xff00 lookup main
-10120 iif docker0 lookup main suppress_prefixlength 0
+10120 iif docker0 lookup main suppress_prefixlength 0 suppress_ifgroup 51820
 10130 iif docker0 lookup 51820
 R
   ! grep -q amn0 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.PREROUTING" || false
@@ -326,6 +353,7 @@ R
   [ "$status" -eq 0 ]
   [ ! -s "$IP_DIR/rules" ]
   [ ! -s "$IP_DIR/routes" ]
+  [ "$(cat "$IP_DIR/link.eth9")" = "eth9 group default" ]
   [ ! -s "$IPT_DIR/filter.DOCKER-USER" ]
   [ ! -s "$IPT_DIR/mangle.PREROUTING" ]
   [ ! -s "$IPT_DIR/nat.POSTROUTING" ]
