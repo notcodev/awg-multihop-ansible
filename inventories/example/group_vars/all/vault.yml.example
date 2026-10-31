@@ -1,0 +1,85 @@
+---
+# EXAMPLE ONLY. Every value below is a fake placeholder and will not work.
+# Generate the real file with:
+#   uv run scripts/gen-secrets.py all > inventories/<name>/group_vars/all/vault.yml
+# then fill in the S3 credentials and the age identity and encrypt it:
+#   uv run ansible-vault encrypt inventories/<name>/group_vars/all/vault.yml
+# The entry-uplink key lives in a separate, rotatable file:
+#   uv run scripts/gen-secrets.py uplink-key > inventories/<name>/group_vars/all/vault_uplink.yml
+#   (vault_uplink_entry: {private_key, public_key}), encrypted the same way.
+
+# Entry AWG server identity. Seeds the FIRST deploy only; afterwards the backup is the source of truth.
+vault_entry_awg:
+  private_key: FAKE-entry-private-key-placeholder-0000000=
+  public_key: FAKE-entry-public-key-placeholder-00000000=
+  psk: FAKE-entry-psk-placeholder-000000000000000=
+  params:
+    jc: '5'
+    jmin: '10'
+    jmax: '50'
+    s1: '12'
+    s2: '12'
+    s3: '12'
+    s4: '12'
+    h1: '1'
+    h2: '2'
+    h3: '3'
+    h4: '4'
+    i1: FAKE-special-junk-i1
+    i2: ''
+    i3: ''
+    i4: ''
+    i5: ''
+    header_protection_key: FAKE-header-protection-key-placeholder0=
+    content_padding_addition: ''
+    rekey_after_time: 100-120
+    rekey_timeout: 3-7
+    reject_after_time: 150-180
+    keepalive_timeout: 5-15
+    max_handshake_attempts: 15-20
+    random_trailers: 'on'
+    disable_cookies: 'on'
+
+# Exit identity and the uplink link parameters (must match on both ends; the exit is rebuilt from this).
+vault_link_awg:
+  exit_private_key: FAKE-exit-private-key-placeholder-00000=
+  exit_public_key: FAKE-exit-public-key-placeholder-000000=
+  psk: FAKE-link-psk-placeholder-0000000000000=
+  params:
+    jc: '4'
+    jmin: '10'
+    jmax: '50'
+    s1: '12'
+    s2: '12'
+    s3: '12'
+    s4: '12'
+    h1: '1'
+    h2: '2'
+    h3: '3'
+    h4: '4'
+    i1: FAKE-special-junk-i1
+    i2: ''
+    i3: ''
+    i4: ''
+    i5: ''
+    header_protection_key: FAKE-link-header-protection-key-0000=
+    content_padding_addition: ''
+    rekey_after_time: 100-120
+    rekey_timeout: 3-7
+    reject_after_time: 150-180
+    keepalive_timeout: 5-15
+    max_handshake_attempts: 15-20
+    random_trailers: 'on'
+    disable_cookies: 'on'
+
+# S3 credentials: writer goes onto the entry, reader stays on the controller (restore).
+# They may be the same key if your provider cannot separate them.
+vault_backup_writer:
+  access_key: FAKE_WRITER_ACCESS_KEY
+  secret_key: FAKE_WRITER_SECRET_KEY
+vault_backup_reader:
+  access_key: FAKE_READER_ACCESS_KEY
+  secret_key: FAKE_READER_SECRET_KEY
+
+# Output of `age-keygen` (the AGE-SECRET-KEY-... line). The public key goes into vars.yml as backup_age_recipient.
+vault_backup_age_identity: AGE-SECRET-KEY-FAKE-PLACEHOLDER

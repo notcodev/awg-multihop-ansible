@@ -1,0 +1,213 @@
+# multihop-ansible
+
+Ansible project that deploys a two-hop AmneziaWG VPN: an entry server managed from the Amnezia app, an AWG uplink to an exit server, split routing on the entry, encrypted S3 backups of the user state, and playbooks to swap either server.
+
+## What this is
+
+```
+ user (Amnezia app) ──AWG 3.1──▶ ENTRY (country A)                  EXIT (country B)
+   endpoint: entry.<domain>      ┌──────────────────────────┐       ┌──────────────────────┐
+                                 │ container amnezia-awg2   │       │ container            │
+                                 │  (app-managed users)     │       │ multihop-exit        │
+                                 │  NAT → docker0 / amn0    │       │  AWG 3.1 server,     │
+                                 └────────────┬─────────────┘       │  one peer: entry     │
+                                              │ policy routing      │  NAT → internet      │
+                                 ┌────────────▼─────────────┐       └──────────▲───────────┘
+                                 │ container multihop-uplink│──AWG 3.1───────┘
+                                 │  (host network) iface    │   endpoint: exit.<domain>
+                                 │  awg-uplink              │
+                                 └──────────────────────────┘
+```
+
+- Ansible builds the entry exactly like the app would (container `amnezia-awg2`, network `amnezia-dns-net`), so the app adopts it. Users are then managed in the app. Ansible never writes `clientsTable`.
+- The entry's user state is a host bind mount (`/var/lib/multihop/entry-awg`) and is backed up (age-encrypted, change-only) to S3.
+- Traffic from users goes through the exit. Destinations on the split-routing direct list (default: country `ru` plus your own lists) leave straight from the entry.
+- Fail-closed: if the exit or the uplink is down, users lose internet; nothing leaks out of the entry's public IP (except the direct split list, by design).
+- Re-running playbooks is safe: users added in the app are kept.
+
+Ansible-owned things never match `grep amnezia` except `amnezia-awg2` and `amnezia-dns-net`: own containers are `multihop-uplink` / `multihop-exit`, host state is under `/var/lib/multihop/`.
+
+## Requirements
+
+Controller (macOS or Linux):
+
+- `uv` (Python deps and Ansible are installed from `pyproject.toml` via `uv run`)
+- Ansible collections: `make collections`
+- `age` (decrypts backups) and AWS CLI v2 (fetches them)
+- `dig` (the DNS step checks resolvers)
+- development only: `bats-core`, `shellcheck` (`make test lint`)
+
+Servers: two Ubuntu 24.04 hosts with SSH and sudo. Set `ansible_host` of the entry and exit to their **public IPv4 address** (swap playbooks and the DNS step check this).
+
+S3: a **dedicated bucket** with **versioning enabled** (enable it in the provider; the entry's writer key can overwrite or delete objects, versioning is what covers that). Two credential sets: a writer (goes on the entry) and a reader (controller only). They can be the same key if the provider cannot separate them.
+
+## First deploy
+
+1. Copy the inventory and edit it:
+
+   ```bash
+   cp -r inventories/example inventories/prod
+   $EDITOR inventories/prod/hosts.yml inventories/prod/group_vars/all/vars.yml
+   ```
+
+   Set `entry_domain`, `exit_domain`, ports, `backup_*`, and `awg_base_image_digest` (see "Updating the pinned image"). Point `inventory` in `ansible.cfg` at it or pass `-i inventories/prod`.
+
+2. Vault password: put it in `.vault-pass` (gitignored; `ansible.cfg` reads it) or set `ANSIBLE_VAULT_PASSWORD_FILE`.
+
+3. Generate the secrets, fill in the S3 and age fields, encrypt:
+
+   ```bash
+   uv run scripts/gen-secrets.py all > inventories/prod/group_vars/all/vault.yml
+   uv run scripts/gen-secrets.py uplink-key > inventories/prod/group_vars/all/vault_uplink.yml
+   age-keygen -o age.key          # prints the public key; keep age.key out of the repo
+   $EDITOR inventories/prod/group_vars/all/vault.yml
+   uv run ansible-vault encrypt inventories/prod/group_vars/all/vault.yml inventories/prod/group_vars/all/vault_uplink.yml
+   ```
+
+   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `age.key`). Put the age **public** key in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
+
+4. Create DNS A records for `entry_domain` and `exit_domain` pointing at the servers, with a **low TTL (60-300 s)**. The exit swap and the entry re-resolve timer rely on it.
+
+5. Install collections and deploy:
+
+   ```bash
+   make collections
+   uv run ansible-playbook playbooks/site.yml    # exit, then entry, then verify
+   ```
+
+Individual playbooks: `exit.yml`, `entry.yml`, `verify.yml`, `backup.yml` (on-demand backup), `restore.yml`, `swap-exit.yml`, `swap-entry.yml`.
+
+Check the path any time:
+
+```bash
+uv run ansible-playbook playbooks/verify.yml
+uv run ansible-playbook playbooks/verify.yml -e verify_fail_closed=true   # or --tags fail_closed
+```
+
+The fail-closed test stops `multihop-uplink` and checks that `amnezia-awg2` cannot reach the internet. It interrupts users for about a minute. Optional: `-e verify_ip_echo_url=...` (default `https://api.ipify.org`).
+
+## Adding the server in the Amnezia app
+
+Add the server by **domain** (`entry_domain`) with an SSH user that has sudo. The app detects AmneziaWG as already installed (it shows "version 3.1"). Then add users and share keys as usual.
+
+## Rules for the entry
+
+- The entry runs only `amnezia-awg2` and `multihop-uplink`. Do not add other containers to its Docker bridges: the fail-closed exception for the AWG server's replies assumes `amnezia-awg2` is the only UDP sender on `docker0`/`amn0`.
+- **Do not use the app's "remove / reinstall protocol", and do not edit AmneziaWG settings in the app.** The app reinstalls the container: new server keys, an empty user list, and our bind mount and the fixed NAT port range are gone. Every issued key stops working.
+- Drift detection: the backup timer checks every run that `amnezia-awg2` still has the bind mount. If not, `multihop-backup` exits with code 2 and writes `/var/lib/multihop/backup/DRIFT`, and `entry.yml` fails with recovery instructions. Look for it with `systemctl status multihop-backup.service` and `journalctl -u multihop-backup`.
+
+## Recovery
+
+Replace the entry's user state with the latest backup (also the fix after an app reinstall). Users added after that backup are lost:
+
+```bash
+uv run ansible-playbook playbooks/restore.yml                      # asks for confirmation
+uv run ansible-playbook playbooks/restore.yml -e confirm=yes
+```
+
+Restore an older backup (names are the object keys under `<backup_s3_prefix>/`, e.g. `entry-<timestamp>.tar.age`; list with `aws s3 ls --endpoint-url <endpoint> s3://<bucket>/<prefix>/`):
+
+```bash
+uv run ansible-playbook playbooks/restore.yml -e backup_object=entry-<timestamp>.tar.age
+```
+
+The backup is fetched with the reader credentials, decrypted locally with the age identity from the vault, validated, pushed to the entry and deleted from the controller. Backup content wins over vault values. After a reinstall, the app may have to be re-pointed at the server (same domain, nothing else changes).
+
+## Swap the exit
+
+The exit's identity is entirely in the vault, so a new exit is identical and the entry needs no change.
+
+1. In the inventory put the **new** host in `exit` (`ansible_host` = its public IPv4); optionally the old one in `exit_old`.
+2. Run:
+
+   ```bash
+   uv run ansible-playbook playbooks/swap-exit.yml                 # leaves the old exit running
+   uv run ansible-playbook playbooks/swap-exit.yml -e stop_old=yes # also stops the old exit
+   ```
+
+It deploys the exit, updates the DNS record for `exit_domain` (manual backend: it asks you to change the record and waits until resolvers return the new IP), waits for the entry's re-resolve timer (about 1 minute plus TTL) to flip the endpoint, forces a handshake, verifies, and stops the old exit when `stop_old=yes`.
+
+## Swap the entry
+
+1. Put the **new** host in `entry` and the **old** one in `entry_old` (one host each, public IPv4 `ansible_host`; the new entry must be a different host).
+2. Run (asks for confirmation; skip with `-e confirm=yes`):
+
+   ```bash
+   uv run ansible-playbook playbooks/swap-entry.yml
+   ```
+
+- **Old entry reachable:** takes a final backup, stops the old app, uplink and backup timer (they stay stopped across reboots), then restores exactly that backup on the new entry. No users are lost.
+- **Old entry unreachable:** rotates the entry-uplink key into `vault_uplink.yml`, redeploys the exit so it accepts only the new key, and restores `latest`. Users added after the last backup are lost. Keep the rewritten `vault_uplink.yml`. This step needs a vault password **file** (`.vault-pass` or `ANSIBLE_VAULT_PASSWORD_FILE`); `--ask-vault-pass` is not supported.
+
+Both cases then deploy the entry, update the DNS record for `entry_domain`, and verify. Add `-e backup_object=entry-<ts>.tar.age` to restore a specific backup. After the swap, update the server in the app only if it was added by IP; by domain nothing changes.
+
+## Manual rekey of the entry protocol parameters
+
+There is no rekey playbook. Edit `params` in `vault_entry_awg`, delete `/var/lib/multihop/entry-awg/awg0.conf` on the entry, and run `entry.yml` again. This **invalidates every issued user key**; users must get new keys from the app.
+
+## Split routing variables
+
+In `group_vars/all/vars.yml`:
+
+| Variable | Meaning |
+|---|---|
+| `split_routing_enabled` | `true`/`false`; off sends everything through the exit |
+| `split_direct_countries` | country codes whose IP ranges leave directly from the entry (default `[ru]`) |
+| `split_country_list_url` | list source, `{cc}` is the country code |
+| `split_direct_cidrs` | extra networks that go direct |
+| `split_direct_domains` | domains whose addresses go direct (re-resolved every 10 min) |
+| `split_force_exit_cidrs` | networks forced through the exit even if they are in a direct list |
+
+Country lists refresh every 24 h. A failed or garbage download keeps the previous set. Apply changes with `uv run ansible-playbook playbooks/entry.yml`. Other useful variables: `extra_input_tcp_ports` (extra open TCP ports in the host firewall), `uplink_mtu` (default 1280), `backup_interval` (default `15min`).
+
+## DNS
+
+`dns_backend` defaults to `manual`: the swap playbooks ask you to set the record (A, TTL 60-300) and then wait until `1.1.1.1` and `8.8.8.8` return the new IP (`dig` on the controller).
+
+To add a provider backend, create `roles/dns_update/tasks/backend_<name>.yml` and set `dns_backend: <name>`. It receives `dns_record` (fqdn) and `dns_ip`. The role verifies resolution afterwards, so the backend only has to make the change.
+
+## Updating the pinned image
+
+The base image `amneziavpn/amneziawg-go` is pinned by digest in `awg_base_image_digest`:
+
+```bash
+curl -s https://hub.docker.com/v2/repositories/amneziavpn/amneziawg-go/tags/latest | jq -r .digest
+```
+
+Put the `sha256:...` value into `vars.yml` and re-run `exit.yml` and `entry.yml`.
+
+## Troubleshooting
+
+On the entry:
+
+```bash
+docker exec amnezia-awg2 awg show               # users and handshakes
+docker exec multihop-uplink awg show awg-uplink # uplink handshake and endpoint
+ip rule show                                    # priorities 10100, 10110, 10120, 10130
+ip route show table multihop
+iptables -S MULTIHOP-FWD
+iptables -t mangle -S MULTIHOP-MARK
+ipset list -t                                   # multihop_direct, multihop_force_exit (sizes)
+journalctl -u 'multihop-*' --since '1 hour ago'
+systemctl list-timers 'multihop-*'
+ls /var/lib/multihop/backup/DRIFT               # present = app reinstalled the container
+```
+
+On the exit:
+
+```bash
+docker exec multihop-exit awg show awg-exit
+journalctl -u 'multihop-*'
+```
+
+- No handshake on `awg-uplink`: check that `exit_domain` resolves to the exit, the exit's `exit_awg_port` is open (UDP), and `awg_*` parameters match (vault `vault_link_awg`).
+- Users have no internet, uplink up: `verify.yml`; check `ip rule show` and `ip route show table multihop`.
+- Users have no internet, uplink down: expected (fail-closed). Fix the uplink.
+- Run a backup now: `uv run ansible-playbook playbooks/backup.yml`.
+
+## Development
+
+```bash
+make test    # pytest + bats
+make lint    # shellcheck, ansible-lint, playbook syntax checks
+```
