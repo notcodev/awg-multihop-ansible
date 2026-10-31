@@ -56,11 +56,13 @@ def _options(modules):
 def test_module_args_exist():
     uses = _all_module_uses()
     assert uses, "no module tasks found"
-    options = _options({m for _, _, m, _ in uses})
+    modules = {m for _, _, m, _ in uses}
+    options = _options(modules)
+    assert not modules - set(options), f"ansible-doc did not document: {sorted(modules - set(options))}"
     bad = [f"{origin}: '{task}' {module}: {sorted(args - options[module])}"
            for origin, task, module, args in uses
            # raw-params modules (command/shell) take free-form args
-           if module in options and args - options[module] - {"_raw_params", "cmd", "argv"}]
+           if args - options[module] - {"_raw_params", "cmd", "argv"}]
     assert not bad, "unknown module options:\n" + "\n".join(bad)
 
 
