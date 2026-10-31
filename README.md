@@ -114,7 +114,9 @@ Restore an older backup (names are the object keys under `<backup_s3_prefix>/`, 
 uv run ansible-playbook playbooks/restore.yml -e backup_object=entry-<timestamp>.tar.age
 ```
 
-The backup is fetched with the reader credentials, decrypted locally with the age identity from the vault, validated, pushed to the entry and deleted from the controller. Backup content wins over vault values. After a reinstall, the app may have to be re-pointed at the server (same domain, nothing else changes).
+The backup is fetched with the reader credentials, decrypted locally with the age identity from the vault, validated, pushed to the entry and deleted from the controller. Backup content wins over vault values.
+
+Validation refuses any archive member that is not a regular file directly at the archive root, and any `awg0.conf` key outside the AmneziaWG allow-list (no `PreUp`/`PostUp`/`PreDown`/`PostDown`, `SaveConfig`, `Table`, `DNS`; awg-quick would run hooks as root). It also requires `ListenPort` = `entry_awg_port` and `Address` inside `entry_awg_subnet`. age does not prove who wrote a backup, and the entry's writer key can upload one, so if the old entry may have been compromised, restore a `backup_object` from before the compromise instead of `latest`. After a reinstall, the app may have to be re-pointed at the server (same domain, nothing else changes).
 
 ## Swap the exit
 
