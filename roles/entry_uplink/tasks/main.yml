@@ -134,3 +134,10 @@
     name: multihop-reresolve.timer
     enabled: true
     state: started
+
+# Apply changed rules (reload multihop-net) and uplink config now, before
+# entry_app converges amnezia-awg2. Also keeps the notification if a later
+# role fails: Ansible drops pending handlers of a failed play, and the next
+# run would see no change and never reload.
+- name: Apply uplink changes before the app is converged
+  ansible.builtin.meta: flush_handlers

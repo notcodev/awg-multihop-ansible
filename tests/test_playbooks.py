@@ -202,3 +202,14 @@ def test_wait_handshake_since_requires_a_newer_handshake(tmp_path):
     now = int(subprocess.run(["date", "+%s"], capture_output=True, text=True).stdout)
     assert _wait_handshake(tmp_path, SINCE=now, FAKE_HS=now - 5).returncode != 0
     assert _wait_handshake(tmp_path, SINCE=now, FAKE_HS=now).returncode == 0
+
+
+def test_entry_uplink_applies_its_handlers_before_the_next_role():
+    # Rule/script changes must be live before entry_app converges amnezia-awg2,
+    # and a later failure (e.g. the app image build) must not drop the
+    # pending reload: Ansible forgets notifications of a failed play.
+    tasks = yaml.safe_load((ROOT / "roles" / "entry_uplink" / "tasks" / "main.yml").read_text())
+    assert tasks[-1].get("ansible.builtin.meta") == "flush_handlers"
+    container = next(i for i, t in enumerate(tasks)
+                     if t.get("name") == "Run multihop-uplink container")
+    assert container < len(tasks) - 1  # the restart handler finds the container
