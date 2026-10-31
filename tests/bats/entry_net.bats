@@ -45,14 +45,14 @@ case "$op" in
 esac
 rc=$?
 # Guard: when $IPT_GUARD lists bridges, every filter -D/-F/-X must leave
-# DOCKER-USER jumping to a chain that drops each bridge -> eth9.
+# DOCKER-USER jumping to a chain that drops everything else from each bridge.
 if [ "$t" = filter ] && [ -f "$IPT_GUARD" ]; then
   case "$op" in -D|-F|-X)
     ok=
     for j in $(sed -n 's/^-j //p' "$d/filter.DOCKER-USER"); do
       all=1
       for br in $(cat "$IPT_GUARD"); do
-        grep -qxF -e "-i $br -o eth9 -j DROP" "$d/filter.$j" 2>/dev/null || all=
+        grep -qxF -e "-i $br -j DROP" "$d/filter.$j" 2>/dev/null || all=
       done
       [ -n "$all" ] && ok=1
     done
@@ -114,14 +114,23 @@ expected_rules() {
 R
 }
 
+# Allow-list per bridge: uplink, the bridges, and out the public interface
+# only direct-marked or AWG UDP; everything else (e.g. a provider private
+# network on another NIC) is dropped.
 expected_fwd() {
   cat <<'R'
+-i docker0 -o awg-uplink -j RETURN
+-i docker0 -o docker0 -j RETURN
+-i docker0 -o amn0 -j RETURN
 -i docker0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
 -i docker0 -o eth9 -p udp --sport 51470 -j RETURN
+-i amn0 -o awg-uplink -j RETURN
+-i amn0 -o docker0 -j RETURN
+-i amn0 -o amn0 -j RETURN
 -i amn0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
 -i amn0 -o eth9 -p udp --sport 51470 -j RETURN
--i docker0 -o eth9 -j DROP
--i amn0 -o eth9 -j DROP
+-i docker0 -j DROP
+-i amn0 -j DROP
 R
 }
 
@@ -141,7 +150,7 @@ snapshot() {
 # Providers install DHCP host routes (e.g. to their resolvers) via the public
 # interface; bridge traffic must not take them (dropped by the backstop, so
 # DNS from containers failed) but go through the uplink like the default route.
-@test "bridge traffic never takes a main route via the public interface" {
+@test "public interface is grouped before rule 10120 suppresses its group" {
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   [ "$(cat "$IP_DIR/link.eth9")" = "eth9 group 51820" ]
@@ -159,6 +168,7 @@ exec sh "$BATS_TEST_TMPDIR/bin/ip.real" "\$@"
 STUB
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
+  [[ "$output" == *"cannot set the group of eth9"* ]]
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") <(expected_rules)
 }
 
@@ -179,11 +189,13 @@ STUB
   [ "$(cat "$MULTIHOP_RT_TABLES_DIR/multihop.conf")" = "51820 multihop" ]
 }
 
-@test "drop bridge->public is last in MULTIHOP-FWD" {
+@test "MULTIHOP-FWD allow-lists per bridge and drops the rest last" {
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   diff "$IPT_DIR/filter.MULTIHOP-FWD" <(expected_fwd)
-  [ "$(tail -n1 "$IPT_DIR/filter.MULTIHOP-FWD")" = "-i amn0 -o eth9 -j DROP" ]
+  [ "$(tail -n1 "$IPT_DIR/filter.MULTIHOP-FWD")" = "-i amn0 -j DROP" ]
+  # no DROP is limited to an output interface: other NICs are covered too
+  ! grep -e '-o .* -j DROP' "$IPT_DIR/filter.MULTIHOP-FWD" || false
   [ "$(cat "$IPT_DIR/filter.DOCKER-USER")" = "-j MULTIHOP-FWD" ]
 }
 
@@ -194,12 +206,12 @@ STUB
     f="$IPT_DIR/filter.MULTIHOP-FWD"
     mark=$(grep -n -x -e "-i $br -o eth9 -m mark --mark 0x5a/0xff -j RETURN" "$f" | cut -d: -f1)
     reply=$(grep -n -x -e "-i $br -o eth9 -p udp --sport 51470 -j RETURN" "$f" | cut -d: -f1)
-    drop=$(grep -n -x -e "-i $br -o eth9 -j DROP" "$f" | cut -d: -f1)
+    drop=$(grep -n -x -e "-i $br -j DROP" "$f" | cut -d: -f1)
     [ -n "$mark" ] && [ -n "$reply" ] && [ -n "$drop" ]
     [ "$mark" -lt "$drop" ] && [ "$reply" -lt "$drop" ]
   done
-  # nothing else is let through
-  [ "$(grep -c -e '-j RETURN' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 4 ]
+  # out the public interface nothing else is let through
+  [ "$(grep -c -e '-o eth9 .*-j RETURN' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 4 ]
 }
 
 @test "force_exit RETURN precedes direct MARK" {

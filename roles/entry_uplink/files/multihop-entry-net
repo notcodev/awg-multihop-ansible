@@ -13,8 +13,9 @@
 # via it (e.g. to their resolvers), which bridge traffic must not take.
 # Table 51820 holds `default dev awg-uplink` (added by the uplink container)
 # and a blackhole default, so with the uplink down traffic is dropped.
-# MULTIHOP-FWD (from DOCKER-USER) is the backstop: bridge -> public interface
-# is dropped unless direct-marked or an AWG reply.
+# MULTIHOP-FWD (from DOCKER-USER) is the backstop, an allow-list per bridge:
+# to awg-uplink, to the bridges, and to the public interface only when
+# direct-marked or AWG UDP; anything else from a bridge is dropped.
 #
 # "AWG traffic" is UDP from a bridge with source port ENTRY_AWG_PORT, in
 # either conntrack direction: replies, and packets the AWG server sends after
@@ -113,14 +114,20 @@ ip6_undrop() {
   done
 }
 
+# Allow-list per bridge: into the uplink, between the bridges, and out the
+# public interface only direct-marked or AWG UDP. Everything else from a
+# bridge is dropped, whatever the output interface (e.g. a provider private
+# network on another NIC, which rule 10120 may route to via main).
 fwd_rules() {
-  local br
+  local br out
   for br in $BRIDGES; do
+    echo "-i $br -o $UPLINK_IFACE -j RETURN"
+    for out in $BRIDGES; do echo "-i $br -o $out -j RETURN"; done
     echo "-i $br -o $PUBLIC_IFACE -m mark --mark $DIRECT_MARK -j RETURN"
     echo "-i $br -o $PUBLIC_IFACE $AWG_UDP -j RETURN"
   done
   for br in $BRIDGES; do
-    echo "-i $br -o $PUBLIC_IFACE -j DROP"
+    echo "-i $br -j DROP"
   done
 }
 
