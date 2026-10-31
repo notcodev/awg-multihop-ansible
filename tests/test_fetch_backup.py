@@ -348,3 +348,24 @@ def test_dns_update_hostsfile_backend(tmp_path):
     assert "changed=0" in proc.stdout
     assert hosts.read_text() == ("127.0.0.1 localhost\n203.0.113.9 exit.example.test\n"
                                  "192.0.2.7 other.exit.example.test\n")
+
+
+def test_dns_update_hostsfile_extra_hosts(tmp_path):
+    """dns_hostsfile_hosts widens the pin beyond the entry group (lab VPN client hosts)."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    playbook = tmp_path / "dns.yml"
+    playbook.write_text(HOSTSFILE_PLAYBOOK.format(path=hosts))
+    inventory = tmp_path / "inv.yml"
+    inventory.write_text("all:\n  children:\n    entry: {}\n    lab_client:\n      hosts:\n"
+                         "        localhost:\n          ansible_connection: local\n")
+    env = dict(os.environ, ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"))
+    if not (ROOT / ".vault-pass").exists():
+        env.setdefault("ANSIBLE_VAULT_PASSWORD_FILE", str(FIXTURE_VAULT_PASS))
+    cmd = [shutil.which("ansible-playbook") or "ansible-playbook", "-i", str(inventory),
+           "-e", "ansible_become=false",
+           "-e", '{"dns_hostsfile_hosts": "{{ groups.entry + groups.lab_client }}"}', str(playbook)]
+    proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "203.0.113.9 exit.example.test" in hosts.read_text()
