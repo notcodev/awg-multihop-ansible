@@ -168,7 +168,7 @@ exec sh "$BATS_TEST_TMPDIR/bin/ip.real" "\$@"
 STUB
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
-  [[ "$output" == *"cannot set the group of eth9"* ]]
+  grep -qF "cannot set the group of eth9" <<<"$output"
   diff <(sort -s -n -k1,1 "$IP_DIR/rules") <(expected_rules)
 }
 
