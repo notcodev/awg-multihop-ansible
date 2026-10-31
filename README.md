@@ -223,3 +223,13 @@ journalctl -u 'multihop-*'
 make test    # pytest + bats
 make lint    # shellcheck, ansible-lint, playbook syntax checks
 ```
+
+Integration test on throwaway x86_64 Ubuntu hosts (root SSH; the hosts are wiped by their owner afterwards). Put the IPs in `tests/integration/.state/lab.env` (`ENTRY_IP`, `EXIT_IP`, `EXIT2_IP`, optional `CLIENT_IP`), the SSH key in `.state/id_ed25519` and the host keys in `.state/known_hosts`, and for the backup checks a real S3 bucket in `.state/s3.env` (`BACKUP_S3_ENDPOINT`, `BACKUP_S3_REGION`, `BACKUP_S3_BUCKET`, `BACKUP_S3_PREFIX`, `WRITER_ACCESS_KEY`, `WRITER_SECRET_KEY`, `READER_ACCESS_KEY`, `READER_SECRET_KEY`). Everything under `.state/` and the generated parts of `inventories/lab/` are gitignored.
+
+```bash
+tests/integration/run.sh init     # lab inventory + secrets (re-run after editing s3.env)
+tests/integration/run.sh deploy   # site.yml plus a test VPN client added like the app does
+tests/integration/run.sh check    # PASS/FAIL per check; logs in .state/logs/
+tests/integration/run.sh swap     # exit swap to EXIT2 (last)
+tests/integration/run.sh clean    # optional: remove containers and state from the hosts
+```

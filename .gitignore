@@ -9,3 +9,6 @@ __pycache__/
 .DS_Store
 tests/fixtures/inventory-vault/
 tests/integration/.state/
+inventories/lab/hosts.yml
+inventories/lab/group_vars/all/lab.yml
+inventories/lab/group_vars/all/vault*.yml

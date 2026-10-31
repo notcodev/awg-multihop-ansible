@@ -1,0 +1,12 @@
+[Interface]
+PrivateKey = {{ lab_client_key.private_key }}
+Address = {{ lab_client_ip }}/32
+{% for line in vault_entry_awg.params | awg_params_lines(false) %}
+{{ line }}
+{% endfor %}
+
+[Peer]
+PublicKey = {{ vault_entry_awg.public_key }}
+PresharedKey = {{ vault_entry_awg.psk }}
+AllowedIPs = 0.0.0.0/0
+Endpoint = {{ lab_entry_ip }}:{{ entry_awg_port }}

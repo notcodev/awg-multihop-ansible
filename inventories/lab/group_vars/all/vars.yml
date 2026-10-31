@@ -1,0 +1,33 @@
+---
+# Cloud lab used by tests/integration/run.sh (throwaway x86_64 Ubuntu hosts).
+# `run.sh init` generates the gitignored rest of this inventory from
+# tests/integration/.state/lab.env: hosts.yml (IPs, SSH), group_vars/all/lab.yml
+# (AWG ports, S3 location, age recipient) and the encrypted vault.yml,
+# vault_uplink.yml and vault_s3.yml (password in tests/integration/.state/vault-pass).
+
+# domains: fake names, resolved through /etc/hosts on the entry (hostsfile backend)
+entry_domain: entry.multihop.test
+exit_domain: exit.multihop.test
+dns_backend: hostsfile
+ssh_port: 22
+
+# addressing and image
+entry_awg_subnet: 10.8.1.0/24
+uplink_subnet: 10.9.0.0/30
+uplink_mtu: 1280
+awg_base_image_digest: sha256:cbafc02b8373a83f428272db6d8001b37bc02e6211cbd8c0cb4e2e3759b12b72
+
+# split routing: one direct domain, no country list
+split_routing_enabled: true
+split_direct_countries: []
+split_country_list_url: "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"
+split_direct_cidrs: []
+split_direct_domains: [ifconfig.me]
+split_force_exit_cidrs: []
+
+# backups: the owner's real S3 bucket. Endpoint, region, bucket and prefix are
+# written to lab.yml from tests/integration/.state/s3.env, the keys to vault_s3.yml.
+backup_interval: 15min
+
+# entry and exit have their own public IPs here
+verify_compare_ips: true

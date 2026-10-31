@@ -1,0 +1,111 @@
+---
+# Lab-only helpers for tests/integration/run.sh. Never part of a real deploy.
+#   --tags pin     exit_domain -> exit IP in the entry's /etc/hosts (dns_update, hostsfile)
+#   --tags tools   tcpdump/conntrack on the hosts the checks inspect
+#   --tags client  test VPN client on lab_client, its peer added on the entry like the app does
+
+- name: Pin the exit domain on the entry (hostsfile DNS backend)
+  hosts: exit
+  gather_facts: false
+  tags: [pin]
+  vars:
+    dns_record: "{{ exit_domain }}"
+    dns_ip: "{{ ansible_host }}"
+  tasks:
+    - name: Update DNS
+      ansible.builtin.include_role:
+        name: dns_update
+
+- name: Tools the checks use
+  hosts: entry:exit:lab_client
+  become: true
+  tags: [tools]
+  tasks:
+    - name: Install tcpdump and conntrack
+      ansible.builtin.apt:
+        name: [tcpdump, conntrack]
+        update_cache: true
+        cache_valid_time: 3600
+
+- name: Test VPN client
+  hosts: lab_client
+  become: true
+  tags: [client]
+  vars:
+    _entry: "{{ groups['entry'][0] }}"
+  tasks:
+    - name: Install docker
+      ansible.builtin.apt:
+        name: [docker.io, python3-docker]
+        update_cache: true
+        cache_valid_time: 3600
+
+    # Same upstream image the servers use, pulled for the client side only.
+    - name: Pull the client image
+      community.docker.docker_image:
+        name: "amneziavpn/amneziawg-go@{{ awg_base_image_digest }}"
+        source: pull
+
+    - name: Create the client directory
+      ansible.builtin.file:
+        path: /var/lib/multihop-lab/client
+        state: directory
+        mode: "0700"
+
+    - name: Write the client config (what the app would hand to a user)
+      ansible.builtin.template:
+        src: templates/client.conf.j2
+        dest: /var/lib/multihop-lab/client/lab0.conf
+        mode: "0600"
+      vars:
+        lab_entry_ip: "{{ hostvars[_entry].ansible_host }}"
+      register: lab_client_conf
+
+    # No PersistentKeepalive: the idle check needs a silent client.
+    - name: Run the client
+      community.docker.docker_container:
+        name: lab-client
+        image: "amneziavpn/amneziawg-go@{{ awg_base_image_digest }}"
+        state: started
+        recreate: true  # fresh netns: awg-quick up needs a clean interface
+        restart_policy: unless-stopped
+        privileged: true
+        devices: [/dev/net/tun:/dev/net/tun:rwm]
+        env:
+          WG_QUICK_USERSPACE_IMPLEMENTATION: amneziawg-go
+        entrypoint: [bash, -c]
+        # curl and nc for the checks, fetched before the tunnel takes the route.
+        command: ["apk add --no-cache curl netcat-openbsd >/dev/null && awg-quick up /etc/amnezia/lab0.conf && exec sleep infinity"]
+        volumes:
+          - /var/lib/multihop-lab/client/lab0.conf:/etc/amnezia/lab0.conf:ro
+
+- name: Add the client as a user, the way the Amnezia app does
+  hosts: entry
+  become: true
+  gather_facts: false
+  tags: [client]
+  tasks:
+    # The app appends a [Peer] to awg0.conf, records the client in
+    # clientsTable and live-applies with `awg syncconf` (no restart).
+    - name: Append the peer, update clientsTable, syncconf
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          D=/opt/amnezia/awg
+          ex() { docker exec -i amnezia-awg2 bash -c "$1"; }
+          if ex "grep -qF '$PUB' $D/awg0.conf"; then echo present; exit 0; fi
+          PSK=$(ex "cat $D/wireguard_psk.key")
+          printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n\n' "$PUB" "$PSK" "$IP" \
+            | ex "cat >> $D/awg0.conf"
+          ex "[ -s $D/clientsTable ] || echo '[]' > $D/clientsTable"
+          ex "cat $D/clientsTable" \
+            | jq -c --arg id "$PUB" '. + [{clientId: $id, userData: {clientName: "lab-client", creationDate: "2026-10-31"}}]' \
+            | ex "cat > $D/clientsTable"
+          ex "awg syncconf awg0 <(awg-quick strip $D/awg0.conf)"
+          echo added
+        executable: /bin/bash
+      environment:
+        PUB: "{{ lab_client_key.private_key | awg_pubkey }}"
+        IP: "{{ lab_client_ip }}"
+      register: lab_peer_add
+      changed_when: "'added' in lab_peer_add.stdout"
