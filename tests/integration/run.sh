@@ -289,6 +289,16 @@ pkts() { # pkts <capture file>: "<count>[ first: <packet>]", or "ERR(...)" if tc
 
 ge1() { [ "${1%% *}" -ge 1 ] 2>/dev/null; } # count from pkts() >= 1 (ERR -> false)
 
+listening() { # listening <capture file>...: wait (max 30 s) until every tcpdump listens
+  local f _
+  for _ in $(seq 1 60); do
+    sleep 0.5
+    for f in "$@"; do grep -q '^listening on ' "$f" 2>/dev/null || continue 2; done
+    return 0
+  done
+  return 1
+}
+
 entry_hashes() {
   on "$ENTRY_IP" 'cd /var/lib/multihop/entry-awg && sha256sum awg0.conf clientsTable' | awk '{print $1}' | paste -sd' ' -
 }
@@ -402,7 +412,7 @@ ck_client_udp_sport() { # user UDP from source port entry_awg_port goes via the 
   q='\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01'
   capture "$ENTRY_IP" 15 "$eif" 'udp and host 1.1.1.1 and port 53' > "$STATE/cap-entry" &
   capture "$EXIT_NOW" 15 "$xif" 'udp and dst host 1.1.1.1 and dst port 53' > "$STATE/cap-exit" &
-  sleep 3
+  listening "$STATE/cap-entry" "$STATE/cap-exit"
   ans=$(client bash -c "printf '$q' | timeout 5 nc -u -p $p -w 3 1.1.1.1 53 | wc -c" | tr -d ' ')
   ct=$(on "$ENTRY_IP" "conntrack -L -p udp --dst 1.1.1.1 --dport 53 2>/dev/null | grep -o 'sport=[0-9]*' | head -n 1")
   wait
@@ -415,29 +425,39 @@ ck_client_udp_sport() { # user UDP from source port entry_awg_port goes via the 
 }
 
 ck_client_fail_closed() {
-  # Positive evidence: the client's packets do reach the entry (docker0, out of
-  # amnezia-awg2) and are dropped there (table 51820's blackhole: the routing
-  # drop happens before FORWARD, so the MULTIHOP-FWD DROP counter is only
-  # informational), while none leave the public interface.
-  local ent br rc eif d0 d1
-  eif=$(pubif "$ENTRY_IP")
+  # Positive evidence that the client tried and the entry dropped it: its AWG
+  # packets arrive on the public interface, the kernel's reverse-path counter
+  # rises (with the uplink down, the reverse route for a client behind
+  # amnezia-awg2 resolves via table 51820's blackhole, so loose rp_filter
+  # drops the inbound packets), and nothing to 1.1.1.1 leaves. Packets seen
+  # on the bridges and the MULTIHOP-FWD DROP delta are informational.
+  local ent in rc eif p d0 d1 r0 r1 b n caps=() brs br=""
+  eif=$(pubif "$ENTRY_IP"); p=$(P)
+  brs=$(on "$ENTRY_IP" '. /etc/multihop/multihop.env && echo "$BRIDGES"')
   on "$ENTRY_IP" docker stop multihop-uplink >/dev/null
-  d0=$(fwd_counter drop)
+  d0=$(fwd_counter drop); r0=$(rpf_drops)
   capture "$ENTRY_IP" 20 "$eif" 'host 1.1.1.1' > "$STATE/cap-entry" &
-  capture "$ENTRY_IP" 20 docker0 'dst host 1.1.1.1' > "$STATE/cap-bridge" &
-  sleep 3
+  capture "$ENTRY_IP" 20 "$eif" "udp and src host $CLIENT_IP and dst port $p" > "$STATE/cap-in" &
+  for b in $brs; do
+    capture "$ENTRY_IP" 20 "$b" 'dst host 1.1.1.1' > "$STATE/cap-br-$b" &
+    caps+=("$STATE/cap-br-$b")
+  done
+  listening "$STATE/cap-entry" "$STATE/cap-in" "${caps[@]}"
   client_curl -o /dev/null --max-time 8 https://1.1.1.1; rc=$?
   wait
-  d1=$(fwd_counter drop)
-  ent=$(pkts "$STATE/cap-entry"); br=$(pkts "$STATE/cap-bridge")
+  d1=$(fwd_counter drop); r1=$(rpf_drops)
+  ent=$(pkts "$STATE/cap-entry"); in=$(pkts "$STATE/cap-in")
+  for b in $brs; do n=$(pkts "$STATE/cap-br-$b"); br="$br $b=${n%% first:*}"; done
   on "$ENTRY_IP" docker start multihop-uplink >/dev/null
   wait_uplink && wait_client
-  if [ "$rc" -ne 0 ] && [ "$ent" = 0 ] && ge1 "$br"; then
-    result PASS client_fail_closed "uplink stopped: client curl rc=$rc; docker0 pkts to 1.1.1.1=$br; $eif pkts=0; FWD DROP $d0 -> $d1; restored after start"
+  if [ "$rc" -ne 0 ] && [ "$ent" = 0 ] && ge1 "$in" && [ "$r1" -gt "$r0" ] 2>/dev/null; then
+    result PASS client_fail_closed "uplink stopped: client curl rc=$rc; client AWG pkts in on $eif=${in%% first:*}; rp_filter drops $r0 -> $r1; pkts to/from 1.1.1.1 on $eif=0; bridges:$br; FWD DROP $d0 -> $d1; restored after start"
   else
-    result FAIL client_fail_closed "uplink stopped: client curl rc=$rc; docker0=$br; $eif=$ent; FWD DROP $d0 -> $d1"
+    result FAIL client_fail_closed "uplink stopped: client curl rc=$rc; in=$in; rp_filter $r0 -> $r1; 1.1.1.1 on $eif=$ent; bridges:$br; FWD DROP $d0 -> $d1"
   fi
 }
+
+rpf_drops() { on "$ENTRY_IP" "nstat -asz TcpExtIPReversePathFilter | awk '/IPReversePathFilter/ { print \$2 }'"; }
 
 ck_client_private_net() {
   # A provider private network on another NIC: user traffic to it must be
@@ -446,7 +466,7 @@ ck_client_private_net() {
   on "$ENTRY_IP" 'ip link add mhpriv0 type dummy 2>/dev/null; ip addr replace 10.77.0.1/24 dev mhpriv0 && ip link set mhpriv0 up'
   d0=$(fwd_counter drop)
   capture "$ENTRY_IP" 15 mhpriv0 'host 10.77.0.5' > "$STATE/cap-priv" &
-  sleep 3
+  listening "$STATE/cap-priv"
   client_curl -o /dev/null --max-time 6 http://10.77.0.5/; rc=$?
   wait
   d1=$(fwd_counter drop)
@@ -467,7 +487,7 @@ ck_idle_reply() { # server-initiated packet after the host conntrack entry expir
   ct=$(on "$ENTRY_IP" "conntrack -L -p udp --orig-port-dst $p 2>/dev/null | grep -c 'src=$CLIENT_IP'")
   capture "$ENTRY_IP" 15 "$eif" "udp and src port $p and dst host $CLIENT_IP" > "$STATE/cap-entry" &
   capture "$ENTRY_IP" 15 awg-uplink "host $CLIENT_IP" > "$STATE/cap-uplink" &
-  sleep 3
+  listening "$STATE/cap-entry" "$STATE/cap-uplink"
   on "$ENTRY_IP" "docker exec amnezia-awg2 ping -c 3 -W 1 $CLIENT_TUN_IP" >/dev/null 2>&1
   wait
   eth=$(pkts "$STATE/cap-entry"); up=$(pkts "$STATE/cap-uplink")
