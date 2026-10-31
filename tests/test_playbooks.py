@@ -238,3 +238,18 @@ def test_verify_checks_the_app_container_is_ours():
     assert "'awg=up' in verify_app.stdout_lines" in that
     assert "'to_ports=2' in verify_app.stdout_lines" in that
     assert any("label=[0-9a-f]{64}" in c for c in that)
+
+
+def _unit(path):
+    import configparser
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.optionxform = str
+    cp.read_string((ROOT / path).read_text())
+    return cp
+
+
+def test_docker_cannot_start_without_the_entry_rules():
+    # Wants= alone lets Docker (and amnezia-awg2) start when `up` failed at boot.
+    unit = _unit("roles/entry_uplink/files/docker-multihop.conf")
+    assert unit["Service"]["ExecStartPre"] == "/usr/local/sbin/multihop-entry-net up"
+    assert "multihop-net.service" in unit["Unit"]["After"]
