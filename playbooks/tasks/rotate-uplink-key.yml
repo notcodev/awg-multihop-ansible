@@ -3,13 +3,32 @@
 # then load it so the rest of this run (exit role, entry roles) uses it.
 #
 # Input: uplink_vault_file  absolute path of <inventory>/group_vars/all/vault_uplink.yml
-# ansible-vault runs in the directory and environment ansible-playbook was
-# started with, so it finds the same ansible.cfg / ANSIBLE_VAULT_PASSWORD_FILE.
+# The inner ansible-vault gets this run's config file and its resolved vault
+# password file explicitly. --ask-vault-pass is not supported here.
 # The plaintext key only ever travels through a pipe; it never touches disk.
 - name: Rotate the entry-uplink key
   vars:
     _rotate_tmp: "{{ uplink_vault_file }}.new"
+    _rotate_pass_file: "{{ lookup('ansible.builtin.config', 'DEFAULT_VAULT_PASSWORD_FILE') | default('', true) }}"
   block:
+    - name: Check a vault password file is configured
+      ansible.builtin.stat:
+        path: "{{ _rotate_pass_file if _rotate_pass_file | length > 0 else '/nonexistent' }}"
+      register: _rotate_pass_stat
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Require a vault password file for the key rotation
+      ansible.builtin.assert:
+        that: _rotate_pass_file | length > 0 and _rotate_pass_stat.stat.exists
+        fail_msg: >-
+          Rotating the entry-uplink key encrypts a new vault_uplink.yml and needs a vault
+          password file (vault_password_file in ansible.cfg or ANSIBLE_VAULT_PASSWORD_FILE);
+          got '{{ _rotate_pass_file }}'. --ask-vault-pass is not supported for this step.
+        quiet: true
+      run_once: true
+
     - name: Generate and encrypt a new entry-uplink keypair
       ansible.builtin.shell:
         cmd: >-
@@ -18,9 +37,9 @@
           | ansible-vault encrypt --output {{ _rotate_tmp | quote }}
           && mv {{ _rotate_tmp | quote }} {{ uplink_vault_file | quote }}
         executable: /bin/bash
-        # Local tasks run in the playbook dir by default; use the directory
-        # ansible-playbook was started from instead.
-        chdir: "{{ lookup('ansible.builtin.env', 'PWD') | default(playbook_dir | dirname, true) }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ ansible_config_file | default('', true) }}"
+        ANSIBLE_VAULT_PASSWORD_FILE: "{{ _rotate_pass_file }}"
       changed_when: true
       delegate_to: localhost
       become: false

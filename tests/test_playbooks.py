@@ -90,10 +90,14 @@ def _rotate(tmp_path, target, env):
     out = tmp_path / "loaded.json"
     playbook.write_text(ROTATE_PLAYBOOK.format(
         task=ROOT / "playbooks" / "tasks" / "rotate-uplink-key.yml", target=target, out=out))
-    # PWD as a shell would set it: the rotation runs ansible-vault from there.
+    # Run from elsewhere: the rotation must not depend on the working directory.
+    env = dict(env)
+    pass_file = env.get("ANSIBLE_VAULT_PASSWORD_FILE")
+    if pass_file and not os.path.isabs(pass_file):
+        env["ANSIBLE_VAULT_PASSWORD_FILE"] = str(ROOT / pass_file)
+    env["PWD"] = str(tmp_path)
     proc = subprocess.run(["ansible-playbook", "-i", "localhost,", str(playbook)],
-                          cwd=ROOT, env={**env, "PWD": str(ROOT)},
-                          capture_output=True, text=True)
+                          cwd=tmp_path, env=env, capture_output=True, text=True)
     return proc, out
 
 
@@ -135,3 +139,66 @@ def test_rotate_uplink_key_keeps_old_file_when_encryption_fails(tmp_path):
     assert "fatal: [localhost]" in proc.stdout and "ansible-vault encrypt" in proc.stdout
     assert target.read_text() == "old\n"
     assert [p.name for p in vault_dir.iterdir()] == ["vault_uplink.yml"]
+
+
+def test_rotate_uplink_key_needs_a_vault_password_file(tmp_path):
+    vault_dir = tmp_path / "inv" / "group_vars" / "all"
+    vault_dir.mkdir(parents=True)
+    target = vault_dir / "vault_uplink.yml"
+    target.write_text("old\n")
+
+    # A config without vault_password_file, as with --ask-vault-pass users.
+    cfg = tmp_path / "ansible.cfg"
+    cfg.write_text("[defaults]\ninterpreter_python = auto_silent\n")
+    env = _env(ANSIBLE_CONFIG=str(cfg))
+    env.pop("ANSIBLE_VAULT_PASSWORD_FILE", None)
+    proc, _ = _rotate(tmp_path, target, env)
+    assert proc.returncode != 0
+    assert "needs a vault" in proc.stdout and "password file" in proc.stdout, proc.stdout
+    assert target.read_text() == "old\n"
+
+
+FAKE_DOCKER = """#!/bin/bash
+# docker exec <container> awg show <iface> <what>
+case "$6" in
+  endpoints) printf 'PUB=\\t%s:51821\\n' "$FAKE_EP" ;;
+  latest-handshakes) printf 'PUB=\\t%s\\n' "$FAKE_HS" ;;
+esac
+"""
+
+
+def _wait_handshake(tmp_path, **env):
+    """Run one attempt of the wait-handshake.yml shell with a fake docker."""
+    task = yaml.safe_load((ROOT / "playbooks/tasks/wait-handshake.yml").read_text())[0]
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "docker").write_text(FAKE_DOCKER)
+    (bindir / "docker").chmod(0o755)
+    full = {"PATH": f"{bindir}:{os.environ['PATH']}", "CONTAINER": "c", "IFACE": "i",
+            "ENDPOINT": "", "SINCE": "", "KICK": "", "FAKE_EP": "1.2.3.4", "FAKE_HS": "0"}
+    full.update({k: str(v) for k, v in env.items()})
+    return subprocess.run(["bash", "-c", task["ansible.builtin.shell"]["cmd"]],
+                          env=full, capture_output=True, text=True)
+
+
+def test_wait_handshake_reports_age_and_never(tmp_path):
+    now = int(subprocess.run(["date", "+%s"], capture_output=True, text=True).stdout)
+    proc = _wait_handshake(tmp_path, FAKE_HS=now - 10)
+    assert proc.returncode == 0 and 10 <= int(proc.stdout) < 20
+    proc = _wait_handshake(tmp_path, FAKE_HS=0)
+    assert proc.returncode == 0 and int(proc.stdout) > 10**9
+
+
+def test_wait_handshake_endpoint_is_matched_exactly(tmp_path):
+    now = int(subprocess.run(["date", "+%s"], capture_output=True, text=True).stdout)
+    assert _wait_handshake(tmp_path, ENDPOINT="1.2.3.4", FAKE_EP="1.2.3.4",
+                           FAKE_HS=now).returncode == 0
+    for other in ("11.2.3.4", "1.2.3.40", "5.6.7.8"):
+        proc = _wait_handshake(tmp_path, ENDPOINT="1.2.3.4", FAKE_EP=other, FAKE_HS=now)
+        assert proc.returncode != 0, other
+
+
+def test_wait_handshake_since_requires_a_newer_handshake(tmp_path):
+    now = int(subprocess.run(["date", "+%s"], capture_output=True, text=True).stdout)
+    assert _wait_handshake(tmp_path, SINCE=now, FAKE_HS=now - 5).returncode != 0
+    assert _wait_handshake(tmp_path, SINCE=now, FAKE_HS=now).returncode == 0

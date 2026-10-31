@@ -71,6 +71,10 @@
           - _fb_key is match('^[A-Za-z0-9._/-]+$')
         fail_msg: "Invalid backup object key '{{ _fb_key }}'"
 
+    - name: Show which backup is restored
+      ansible.builtin.debug:
+        msg: "Restoring backup object {{ _fb_key }}"
+
     - name: Download encrypted backup (S3)
       ansible.builtin.command: "{{ _fb_s3_cmd }} {{ ('s3://' ~ backup_s3_bucket ~ '/' ~ _fb_key) | quote }} {{ (_fb_dir.path ~ '/backup.tar.age') | quote }}"
       environment:

@@ -21,6 +21,35 @@
           - groups['entry'][0] != groups['entry_old'][0]
         fail_msg: "Put the new entry in the entry group and the old one in entry_old (one host each)"
 
+    - name: The new entry's ansible_host is an IPv4 address
+      ansible.builtin.assert:
+        that: hostvars[groups['entry'][0]]['ansible_host'] | default('') is match(_ipv4_re)
+        fail_msg: >-
+          Set ansible_host of {{ groups['entry'][0] }} to its public IPv4 address
+          (got '{{ hostvars[groups['entry'][0]]['ansible_host'] | default('') }}'):
+          the DNS step points {{ entry_domain }} at it.
+      vars:
+        _ipv4_re: '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+
+    - name: Ask for confirmation
+      ansible.builtin.pause:
+        prompt: >-
+          Swap the entry from {{ groups['entry_old'][0] }}
+          ({{ hostvars[groups['entry_old'][0]]['ansible_host'] | default(groups['entry_old'][0]) }})
+          to {{ groups['entry'][0] }} ({{ hostvars[groups['entry'][0]]['ansible_host'] }}).
+          If the old entry is reachable it gets a final backup and is stopped; if not,
+          its last backup is restored and users added after that backup are lost.
+          Type 'yes' to continue
+      register: swap_entry_confirm
+      when: confirm | default('') != 'yes'
+
+    - name: Stop unless confirmed
+      ansible.builtin.assert:
+        that: swap_entry_confirm.user_input | default('') | trim == 'yes'
+        fail_msg: "Swap cancelled"
+        quiet: true
+      when: confirm | default('') != 'yes'
+
 - name: Retire the old entry
   hosts: entry_old
   become: true
@@ -42,7 +71,21 @@
       block:
         - name: Run multihop-backup --force
           ansible.builtin.command: /usr/local/sbin/multihop-backup --force
+          register: swap_entry_final_backup
           changed_when: true
+
+        - name: Check the final backup reported its object
+          ansible.builtin.assert:
+            that: swap_entry_final_backup.stdout is search('(?m)^uploaded \\S+$')
+            fail_msg: "multihop-backup --force did not report 'uploaded <key>': {{ swap_entry_final_backup.stdout }}"
+            quiet: true
+
+        # Pin the restore to exactly this object, not whatever `latest` says later.
+        - name: Restore the object the final backup just uploaded
+          ansible.builtin.set_fact:
+            backup_object: "{{ swap_entry_final_backup.stdout | regex_search('^uploaded (\\S+)$', '\\1', multiline=True) | first }}"
+          delegate_to: "{{ groups['entry'][0] }}"
+          delegate_facts: true
 
         - name: Stop and disable the backup timer
           ansible.builtin.systemd_service:

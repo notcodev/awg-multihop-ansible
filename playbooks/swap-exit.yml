@@ -6,10 +6,22 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Exactly one new exit host
+    - name: Exactly one new exit host, different from the old one
       ansible.builtin.assert:
-        that: groups['exit'] | default([]) | length == 1
-        fail_msg: "Put exactly one host (the new exit) in the exit group"
+        that:
+          - groups['exit'] | default([]) | length == 1
+          - groups['exit'][0] not in groups['exit_old'] | default([])
+        fail_msg: "Put exactly one host (the new exit) in the exit group, and only the old one in exit_old"
+
+    - name: The new exit's ansible_host is an IPv4 address
+      ansible.builtin.assert:
+        that: hostvars[groups['exit'][0]]['ansible_host'] | default('') is match(_ipv4_re)
+        fail_msg: >-
+          Set ansible_host of {{ groups['exit'][0] }} to its public IPv4 address
+          (got '{{ hostvars[groups['exit'][0]]['ansible_host'] | default('') }}'):
+          the DNS step and the endpoint check compare against it.
+      vars:
+        _ipv4_re: '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
 
 - name: Deploy the new exit
   ansible.builtin.import_playbook: exit.yml
@@ -27,18 +39,42 @@
 
 # multihop-reresolve on the entry follows the DNS change within about a minute
 # (plus the record's TTL on the entry's resolver). The old exit has the same
-# identity and may still be up, so a fresh handshake alone proves nothing:
-# also require the new endpoint on the entry and a session on the new exit.
+# identity and may still be up, so a fresh handshake alone proves nothing.
+# After the endpoint flips, the entry keeps its old session keys, which the new
+# exit drops; an idle uplink would only rekey after ~2 minutes. So: wait for the
+# flip, then send data over awg-uplink (forces a handshake within ~15 s) and
+# require a handshake newer than the flip.
 - name: Wait for the entry to handshake with the new exit
   hosts: entry
   become: true
   gather_facts: false
+  vars:
+    _new_exit_ip: "{{ hostvars[groups['exit'][0]]['ansible_host'] }}"
+    _uplink_base: "{{ (uplink_subnet | split('/'))[0].split('.') }}"
   tasks:
-    - name: Wait up to 5 minutes for the new endpoint and a fresh handshake
+    - name: Wait up to 5 minutes until the uplink endpoint is the new exit
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          docker exec multihop-uplink awg show awg-uplink endpoints \
+            | awk -v ip="$ENDPOINT" '{ sub(/:[0-9]+$/, "", $2); if ($2 == ip) found = 1 } END { exit !found }'
+          date +%s
+        executable: /bin/bash
+      environment:
+        ENDPOINT: "{{ _new_exit_ip }}"
+      register: swap_exit_flip
+      until: swap_exit_flip.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Force and wait for a handshake with the new exit (one rekey interval at most)
       ansible.builtin.include_tasks: tasks/wait-handshake.yml
       vars:
-        wait_handshake_endpoint: "{{ hostvars[groups['exit'][0]]['ansible_host'] | default(groups['exit'][0]) }}"
-        wait_handshake_retries: 30
+        wait_handshake_endpoint: "{{ _new_exit_ip }}"
+        wait_handshake_since: "{{ swap_exit_flip.stdout | trim }}"
+        wait_handshake_kick: "{{ _uplink_base[:3] | join('.') }}.{{ (_uplink_base[3] | int) + 1 }}"
+        wait_handshake_retries: 20
 
 - name: Confirm the new exit has a session with the entry
   hosts: exit
@@ -50,6 +86,7 @@
       vars:
         wait_handshake_container: multihop-exit
         wait_handshake_iface: awg-exit
+        wait_handshake_retries: 20
 
 - name: Verify
   ansible.builtin.import_playbook: verify.yml
