@@ -144,7 +144,7 @@ seed_previous() {
   conf ru "203.0.113.0/24 203.0.113.77" "" ""
   export CURL_RC=6
   run_script multihop-split-refresh
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   set_has multihop_direct 203.0.113.0/24
   set_has multihop_direct 203.0.113.77
   [ "$(set_count multihop_direct)" -eq 2 ]
@@ -277,4 +277,63 @@ A
 @test "unknown option is rejected" {
   run_script multihop-split-refresh --bogus
   [ "$status" -eq 2 ]
+}
+
+@test "prefixes shorter than /8 are rejected from every source" {
+  seed_previous
+  printf '192.0.2.0/24\n128.0.0.0/1\n' > "$CURL_BODY"
+  run_script multihop-split-refresh
+  ! grep -q '128.0.0.0' "$MULTIHOP_STATE_DIR/split/ru.zone" || false
+  [ "$(set_count multihop_direct)" -eq 2 ]
+  conf "" "128.0.0.0/1 0.0.0.0/7 10.0.0.0/8" "" "64.0.0.0/2"
+  run_script multihop-split-refresh
+  set_has multihop_direct 10.0.0.0/8
+  [ "$(set_count multihop_direct)" -eq 1 ]
+  [ "$(set_count multihop_force_exit)" -eq 0 ]
+}
+
+@test "domain that resolved once keeps its addresses when resolution later fails" {
+  conf "" "" "example.org" ""
+  printf '203.0.113.10\n203.0.113.11\n' > "$DIG_OUT"
+  run_script multihop-split-refresh
+  [ "$status" -eq 0 ]
+  : > "$DIG_OUT"
+  run_script multihop-split-refresh
+  [ "$status" -eq 0 ]
+  set_has multihop_direct 203.0.113.10
+  set_has multihop_direct 203.0.113.11
+  [ "$(set_count multihop_direct)" -eq 2 ]
+  printf 'garbage.\n203.0.113.12\n' > "$DIG_OUT"
+  run_script multihop-split-refresh
+  set_has multihop_direct 203.0.113.12
+  [ "$(set_count multihop_direct)" -eq 1 ]
+}
+
+@test "country without cache and failed download exits non-zero, rest still applied" {
+  conf "ru de" "203.0.113.0/24" "" "198.51.100.0/24"
+  printf '192.0.2.0/24\n' > "$MULTIHOP_STATE_DIR/split/de.zone"
+  export CURL_RC=6
+  run_script multihop-split-refresh
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"configured country ru"* ]]
+  set_has multihop_direct 203.0.113.0/24
+  set_has multihop_direct 192.0.2.0/24
+  set_has multihop_force_exit 198.51.100.0/24
+}
+
+@test "failing temp set creation keeps live direct set and still builds force-exit" {
+  seed_previous
+  conf "" "203.0.113.0/24" "" "198.51.100.0/24"
+  mv "$BATS_TEST_TMPDIR/bin/ipset" "$BATS_TEST_TMPDIR/bin/ipset.real"
+  cat > "$BATS_TEST_TMPDIR/bin/ipset" <<'STUB'
+#!/bin/sh
+[ "$1 $2" = "create multihop_direct_new" ] && exit 1
+exec "$(dirname "$0")/ipset.real" "$@"
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/ipset"
+  run_script multihop-split-refresh
+  [ "$status" -ne 0 ]
+  set_has multihop_direct 10.1.0.0/16
+  [ "$(set_count multihop_direct)" -eq 2 ]
+  set_has multihop_force_exit 198.51.100.0/24
 }

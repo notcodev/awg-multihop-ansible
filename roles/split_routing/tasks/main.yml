@@ -46,13 +46,45 @@
         enabled: true
         state: started
 
-# Disabled: install nothing and empty both sets (they may not exist yet).
-- name: Flush split routing sets
-  ansible.builtin.command: "ipset flush {{ item }}"
-  loop:
-    - multihop_direct
-    - multihop_force_exit
-  register: split_routing_flush
-  changed_when: split_routing_flush.rc == 0
-  failed_when: split_routing_flush.rc != 0 and 'does not exist' not in split_routing_flush.stderr
+# Disabled: remove everything an earlier enabled run installed (the timer
+# would otherwise refill the sets from the old split.conf), then empty both
+# sets (they may not exist yet).
+- name: Remove split routing
   when: not (split_routing_enabled | bool)
+  block:
+    - name: Stop and disable refresh timer and service
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - multihop-split-refresh.timer
+        - multihop-split-refresh.service
+      register: split_routing_stop
+      failed_when:
+        - split_routing_stop.failed | default(false)
+        - "'not find' not in (split_routing_stop.msg | default(''))"
+        - "'not-found' not in (split_routing_stop.msg | default(''))"
+
+    - name: Remove split routing files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/multihop-split-refresh.timer
+        - /etc/systemd/system/multihop-split-refresh.service
+        - /etc/multihop/split.conf
+        - /usr/local/sbin/multihop-split-refresh
+
+    - name: Reload systemd units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Flush split routing sets
+      ansible.builtin.command: "ipset flush {{ item }}"
+      loop:
+        - multihop_direct
+        - multihop_force_exit
+      register: split_routing_flush
+      changed_when: split_routing_flush.rc == 0
+      failed_when: split_routing_flush.rc != 0 and 'does not exist' not in split_routing_flush.stderr

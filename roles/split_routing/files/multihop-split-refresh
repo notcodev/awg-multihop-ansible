@@ -13,7 +13,7 @@
 #     written to a temp file, validated (at least one line, every non-empty
 #     line a CIDR/IPv4), and only then moved into the cache. Anything else
 #     (HTTP error, HTML page, empty body, partial file) keeps the old cache.
-#   * 0.0.0.0/0 (any /0) is never accepted from any source. DNS answers must
+#   * 0.0.0.0/0 (any prefix shorter than /8) is never accepted from any source. DNS answers must
 #     be plain IPv4 addresses (dig may print CNAME targets or garbage).
 #   * If sources are configured but nothing usable could be collected, the
 #     live set is left as it is.
@@ -56,7 +56,7 @@ cleanup() {
 trap cleanup EXIT
 
 # cidr_filter strict|lenient: read lines on stdin, print valid IPv4[/len]
-# entries (never /0). strict exits 1 on any non-empty invalid line or when no
+# entries (never shorter than /8). strict exits 1 on any non-empty invalid line or when no
 # entry was seen; lenient warns about invalid lines and skips them.
 cidr_filter() {
   awk -v mode="$1" '
@@ -67,7 +67,7 @@ cidr_filter() {
         if (n != 2 || a[2] !~ /^[0-9]+$/ || length(a[2]) > 2) return 0
         p = a[2] + 0
         s = a[1]
-        if (p < 1 || p > 32) return 0
+        if (p < 8 || p > 32) return 0
       }
       if (s !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
       n = split(s, a, ".")
@@ -119,6 +119,8 @@ resolve_domain() {
     }'
 }
 
+rc=0
+
 # build_set <set> <entries-file>: fill <set>_new and swap it in. Returns 1 when
 # the live set was left alone.
 build_set() {
@@ -126,7 +128,10 @@ build_set() {
   sort -u "$entries" -o "$entries"
   ipset create "$set" hash:net -exist
   ipset destroy "$tmpset" 2>/dev/null || true
-  ipset create "$tmpset" hash:net
+  if ! ipset create "$tmpset" hash:net; then
+    echo "creating $tmpset failed, keeping live $set" >&2
+    return 1
+  fi
   if ! awk -v s="$tmpset" '{ print "add " s " " $0 }' "$entries" | ipset restore -exist; then
     echo "loading $tmpset failed, keeping live $set" >&2
     ipset destroy "$tmpset" 2>/dev/null || true
@@ -135,8 +140,6 @@ build_set() {
   ipset swap "$tmpset" "$set"
   ipset destroy "$tmpset"
 }
-
-rc=0
 
 # --- multihop_direct ---------------------------------------------------------
 direct="$WORK/direct.entries"
@@ -151,13 +154,29 @@ for cc in $COUNTRIES; do
   if [ -s "$CACHE_DIR/$cc.zone" ]; then
     cidr_filter lenient < "$CACHE_DIR/$cc.zone" >> "$direct" || true
   else
-    echo "no list available for $cc" >&2
+    echo "no usable list for configured country $cc (no valid cache, download failed)" >&2
+    rc=1
   fi
 done
 # shellcheck disable=SC2086
 printf '%s\n' $DIRECT_CIDRS | cidr_filter lenient >> "$direct" || true
+# Last-known A records are kept per domain and replaced only by a resolution
+# that returns at least one valid address, so a DNS blip never shrinks the set.
+mkdir -p "$CACHE_DIR/domains"
 for d in $DIRECT_DOMAINS; do
-  resolve_domain "$d" >> "$direct"
+  if ! [[ "$d" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ignoring invalid domain: $d" >&2
+    continue
+  fi
+  resolve_domain "$d" > "$WORK/$d.ips" || true
+  if [ -s "$WORK/$d.ips" ]; then
+    mv -f "$WORK/$d.ips" "$CACHE_DIR/domains/$d"
+  else
+    echo "no valid A record for $d, using last known addresses" >&2
+  fi
+  if [ -s "$CACHE_DIR/domains/$d" ]; then
+    cat "$CACHE_DIR/domains/$d" >> "$direct"
+  fi
 done
 
 if [ ! -s "$direct" ] && [ -n "${COUNTRIES}${DIRECT_CIDRS}${DIRECT_DOMAINS}" ]; then
