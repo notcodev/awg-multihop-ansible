@@ -214,7 +214,7 @@ journalctl -u 'multihop-*'
 
 - No handshake on `awg-uplink`: check that `exit_domain` resolves to the exit, the exit's `exit_awg_port` is open (UDP), and `awg_*` parameters match (vault `vault_link_awg`).
 - Users have no internet, uplink up: `verify.yml`; check `ip rule show` and `ip route show table multihop`.
-- Users have no internet, uplink down: expected (fail-closed). Fix the uplink.
+- Users have no internet, uplink down: expected (fail-closed). Fix the uplink. While it is down the entry also drops the clients' AWG packets (the reverse-path filter finds no route back through the uplink), so the app shows no handshake at all.
 - Run a backup now: `uv run ansible-playbook playbooks/backup.yml`.
 
 ## Development
