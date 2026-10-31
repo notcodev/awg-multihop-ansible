@@ -173,6 +173,8 @@ Country lists refresh every 24 h. A failed or garbage download keeps the previou
 
 To add a provider backend, create `roles/dns_update/tasks/backend_<name>.yml` and set `dns_backend: <name>`. It receives `dns_record` (fqdn) and `dns_ip`. The role verifies resolution afterwards, so the backend only has to make the change.
 
+`dns_backend: hostsfile` is a lab/testing backend (used by the Multipass integration test): instead of a DNS record it writes `<dns_ip> <dns_record>` into `/etc/hosts` on the hosts in the `entry` group, where `multihop-reresolve` resolves the exit domain, and skips the public-resolver check. Do not use it in production.
+
 ## Updating the pinned image
 
 The base image `amneziavpn/amneziawg-go` is pinned by digest in `awg_base_image_digest`:

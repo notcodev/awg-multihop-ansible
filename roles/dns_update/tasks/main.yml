@@ -6,21 +6,25 @@
       - dns_ip | length > 0
     fail_msg: "dns_update needs dns_record (fqdn) and dns_ip"
 
-- name: Probe dig on the controller
-  ansible.builtin.command:
-    argv: [dig, -v]
-  register: dns_update_dig_probe
-  changed_when: false
-  failed_when: false
-  delegate_to: localhost
-  become: false
-  run_once: true
+# The hostsfile backend (lab/testing) never touches public DNS, so nothing to poll.
+- name: Check dig on the controller
+  when: dns_backend != 'hostsfile'
+  block:
+    - name: Probe dig on the controller
+      ansible.builtin.command:
+        argv: [dig, -v]
+      register: dns_update_dig_probe
+      changed_when: false
+      failed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
 
-- name: Check dig is available on the controller
-  ansible.builtin.assert:
-    that: dns_update_dig_probe.rc | default(1) == 0
-    fail_msg: "dig is not installed on the controller (needed to verify DNS); install bind-utils/dnsutils"
-  run_once: true
+    - name: Check dig is available on the controller
+      ansible.builtin.assert:
+        that: dns_update_dig_probe.rc | default(1) == 0
+        fail_msg: "dig is not installed on the controller (needed to verify DNS); install bind-utils/dnsutils"
+      run_once: true
 
 - name: Update DNS record via backend
   ansible.builtin.include_tasks: "backend_{{ dns_backend }}.yml"
@@ -38,3 +42,4 @@
   delegate_to: localhost
   become: false
   run_once: true
+  when: dns_backend != 'hostsfile'

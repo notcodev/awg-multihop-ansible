@@ -286,3 +286,44 @@ def test_dns_update_requires_dig(tmp_path):
             and not os.path.exists(os.path.join(d, "dig")))):
         pytest.skip("cannot hide dig")
     assert proc.returncode != 0
+
+
+HOSTSFILE_PLAYBOOK = """---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: dns_update
+      dns_backend: hostsfile
+      dns_record: exit.example.test
+      dns_ip: 203.0.113.9
+      dns_hostsfile_path: {path}
+"""
+
+
+def test_dns_update_hostsfile_backend(tmp_path):
+    """Lab backend: (re)writes the record into the entry hosts' hosts file, no dig poll."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n192.0.2.1 exit.example.test\n"
+                     "192.0.2.7 other.exit.example.test\n")
+    playbook = tmp_path / "dns.yml"
+    playbook.write_text(HOSTSFILE_PLAYBOOK.format(path=hosts))
+    inventory = tmp_path / "inv.yml"
+    inventory.write_text("all:\n  children:\n    entry:\n      hosts:\n        localhost:\n"
+                         "          ansible_connection: local\n")
+    env = dict(os.environ)
+    # no dig anywhere on PATH: the hostsfile backend must not need it
+    env["PATH"] = ":".join(d for d in os.environ["PATH"].split(":")
+                           if not os.path.exists(os.path.join(d, "dig")))
+    env["ANSIBLE_CONFIG"] = str(ROOT / "ansible.cfg")
+    if not (ROOT / ".vault-pass").exists():
+        env.setdefault("ANSIBLE_VAULT_PASSWORD_FILE", str(FIXTURE_VAULT_PASS))
+    cmd = [shutil.which("ansible-playbook") or "ansible-playbook", "-i", str(inventory),
+           "-e", "ansible_become=false", str(playbook)]
+    for _ in range(2):  # second run: unchanged
+        proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "changed=0" in proc.stdout
+    assert hosts.read_text() == ("127.0.0.1 localhost\n203.0.113.9 exit.example.test\n"
+                                 "192.0.2.7 other.exit.example.test\n")

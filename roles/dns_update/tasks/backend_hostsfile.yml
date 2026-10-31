@@ -1,0 +1,13 @@
+---
+# Lab/testing backend: no real DNS. Pins dns_record to dns_ip in the hosts file
+# of every host in the `entry` group, where multihop-reresolve resolves the exit
+# domain (getent) and the uplink container reads it. Public resolvers are not
+# polled (see main.yml).
+- name: Pin the record in the entry hosts' hosts file
+  ansible.builtin.lineinfile:
+    path: "{{ dns_hostsfile_path }}"
+    regexp: '^\S+\s+{{ dns_record | regex_escape }}$'
+    line: "{{ dns_ip }} {{ dns_record }}"
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['entry'] | default([]) }}"

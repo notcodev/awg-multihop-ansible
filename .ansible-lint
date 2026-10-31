@@ -5,3 +5,4 @@ exclude_paths:
   - .superpowers/
   - collections/
   - docs/
+  - tests/integration/.state/
