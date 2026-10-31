@@ -232,11 +232,16 @@ Verified against `amnezia-vpn/amnezia-client` at commit `7f9b7db`
     dropped, not leaked, when the uplink is down (fail-closed);
   - rules sending **forwarded traffic arriving from the Docker bridges
     (`iif docker0`, `iif amn0`)** to table `multihop`;
-  - a higher-priority exception so the **AWG server's own reply packets** to
+  - a higher-priority exception so the **AWG server's own packets** to
     users (UDP, source port = entry listen port, coming from the
-    `amnezia-awg2` container) use the main table and leave via the entry's
-    public interface. Without this, replies to users would go into the uplink
-    and break the user→entry link;
+    `amnezia-awg2` container; replies and server-initiated packets alike) use
+    the main table and leave via the entry's public interface. Without this,
+    they would go into the uplink and break the user→entry link. These
+    packets get a dedicated fwmark (`0x5b00/0xff00`) and an `ip rule` for
+    that mark (priority 10110) uses the main table. The source port alone
+    identifies the AWG socket because the container's start.sh masquerades
+    user UDP into a port range that excludes the listen port, so a user flow
+    can never carry that source port;
   - local/bridge destinations (Docker subnets) stay in the main table
     (`suppress_prefixlength 0` pattern or explicit routes).
   - Host-originated traffic (apt, SSH, the uplink's own UDP to the exit, S3
@@ -246,7 +251,7 @@ Verified against `amnezia-vpn/amnezia-client` at commit `7f9b7db`
   entry for the entry.
 - **Firewall fail-closed backstop:** a `DOCKER-USER` (or equivalent) rule
   that drops traffic from the Docker bridges going out of the entry's public
-  interface, except the AWG server's reply packets described above. This is
+  interface, except the AWG server's packets described above. This is
   the guarantee against leaks if routing is ever wrong.
 - **MTU:** two stacked AWG headers. Set the uplink MTU so the inner tunnel
   fits (start with 1420 on the uplink, and clamp TCP MSS on forwarded traffic

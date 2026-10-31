@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 RENDER_DIR = ROOT / "tests" / "render"
 FIXTURE_VAULT_PASS = ROOT / "tests" / "fixtures" / "vault-pass"
@@ -205,3 +207,33 @@ def test_uplink_start_sh():
     assert "CONF=/etc/amnezia/awg-uplink.conf" in text
     assert "trap down TERM INT" in text
     assert 'awg-quick up "$CONF"' in text
+
+
+def _udp_masq_range(text: str, iface: str) -> tuple[int, int]:
+    """Return the --to-ports range of the UDP MASQUERADE rule for iface and
+    assert it precedes the app's generic MASQUERADE rule for the same iface."""
+    lines = text.splitlines()
+    generic = f"iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o {iface} -j MASQUERADE"
+    udp_prefix = f"iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o {iface} -p udp -j MASQUERADE --to-ports "
+    gi = lines.index(generic)  # app line kept verbatim
+    ui = [i for i, ln in enumerate(lines) if ln.startswith(udp_prefix)]
+    assert len(ui) == 1 and ui[0] < gi
+    lo, hi = lines[ui[0]][len(udp_prefix):].split("-")
+    return int(lo), int(hi)
+
+
+@pytest.mark.parametrize("port, expected", [
+    (51470, (1024, 51469)),   # fixture port: everything below it
+    (65535, (1024, 65534)),   # top end
+    (11025, (1024, 11024)),   # exactly 10000 ports below
+    (11024, (11025, 65535)),  # one short: use the range above
+    (1500, (1501, 65535)),    # bottom end
+])
+def test_start_sh_udp_masquerade_excludes_awg_port(port, expected):
+    text = render("roles/entry_app/templates/start.sh.j2", "start.sh",
+                  {"entry_awg_port": port})
+    for iface in ("eth0", "eth1"):
+        lo, hi = _udp_masq_range(text, iface)
+        assert (lo, hi) == expected
+        assert not lo <= port <= hi
+        assert hi - lo + 1 >= 10000

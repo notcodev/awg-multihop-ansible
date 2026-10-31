@@ -80,7 +80,7 @@ STUB
   [ "$(grep -c -e '-j ACCEPT' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 2 ]
   [ "$(wc -l < "$IPT_DIR/nat.MULTIHOP-NAT")" -eq 1 ]
   [ "$(wc -l < "$IPT_DIR/mangle.MULTIHOP-MSS")" -eq 2 ]
-  ! ls "$IPT_DIR" | grep -e '-NEW'
+  ! ls "$IPT_DIR" | grep -e '-NEW' || false
 }
 
 @test "new chain is populated before the jump swap" {

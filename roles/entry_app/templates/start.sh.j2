@@ -1,6 +1,19 @@
 {#- entry_awg_subnet is a network address/prefix, e.g. 10.8.1.0/24 -#}
 {%- set _net = (entry_awg_subnet | split('/'))[0] -%}
 {%- set _prefix = (entry_awg_subnet | split('/'))[1] -%}
+{#- UDP source-port range for masqueraded user traffic that never contains
+    entry_awg_port: below it when that leaves >= 10000 ports, else above it.
+    On the host, "UDP from the bridge with source port entry_awg_port" must
+    mean the AWG server's own socket (replies and server-initiated packets
+    alike); multihop-entry-net routes exactly that via the entry IP. Without
+    this, MASQUERADE keeps a user's source port and a user flow from that
+    port would be treated as AWG traffic. -#}
+{%- set _awg_port = entry_awg_port | int -%}
+{%- if _awg_port - 1 - 1024 >= 10000 -%}
+{%-   set _udp_ports = '1024-' ~ (_awg_port - 1) -%}
+{%- else -%}
+{%-   set _udp_ports = (_awg_port + 1) ~ '-65535' -%}
+{%- endif -%}
 #!/bin/bash
 
 # This scripts copied from Amnezia client to Docker container to /opt/amnezia and launched every time container starts
@@ -25,7 +38,9 @@ iptables -A FORWARD -i awg0 -o eth1 -s {{ _net }}/{{ _prefix }} -j ACCEPT
 
 iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 
+iptables -t nat -A POSTROUTING -s {{ _net }}/{{ _prefix }} -o eth0 -p udp -j MASQUERADE --to-ports {{ _udp_ports }}
 iptables -t nat -A POSTROUTING -s {{ _net }}/{{ _prefix }} -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s {{ _net }}/{{ _prefix }} -o eth1 -p udp -j MASQUERADE --to-ports {{ _udp_ports }}
 iptables -t nat -A POSTROUTING -s {{ _net }}/{{ _prefix }} -o eth1 -j MASQUERADE
 
 tail -f /dev/null

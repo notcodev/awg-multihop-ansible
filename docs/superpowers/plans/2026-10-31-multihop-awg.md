@@ -43,8 +43,10 @@ AWS CLI v2, Docker (`docker.io` on Ubuntu 24.04), Multipass for integration.
   - Host state lives under `/var/lib/multihop/`.
 - Base image `amneziavpn/amneziawg-go` is pinned **by digest** (`awg_base_image_digest`).
 - Fail-closed: traffic from `docker0`/`amn0` may leave the entry's public
-  interface only if it carries the direct mark or is a UDP reply from source
-  port `entry_awg_port`.
+  interface only if it carries the direct mark or is UDP from source port
+  `entry_awg_port` (the AWG server's own socket). That port identifies only
+  the AWG socket because `amnezia-awg2`'s start.sh masquerades user UDP into
+  a port range that excludes `entry_awg_port`.
 - Ansible writes entry state files (`awg0.conf`, key files) **only if
   `awg0.conf` is absent** or during an explicit restore. It never writes
   `clientsTable` (the app creates it).
@@ -53,10 +55,10 @@ AWS CLI v2, Docker (`docker.io` on Ubuntu 24.04), Multipass for integration.
 - Interfaces:
   - `awg-uplink` (entry → exit) and `awg-exit` (exit side);
   - routing table `51820 multihop`;
-  - direct fwmark `0x5a/0xff`;
+  - direct fwmark `0x5a/0xff`; AWG-traffic fwmark `0x5b00/0xff00`;
   - ipsets `multihop_direct` and `multihop_force_exit`;
-  - `ip rule` priorities 10100 (direct mark → main), 10110 (AWG replies →
-    main), 10120 (bridges → main `suppress_prefixlength 0`) and 10130
+  - `ip rule` priorities 10100 (direct mark → main), 10110 (AWG-traffic
+    mark `0x5b00/0xff00` → main), 10120 (bridges → main `suppress_prefixlength 0`) and 10130
     (bridges → multihop).
 - Defaults:
   - user subnet `10.8.1.0/24` (server `10.8.1.1`);
@@ -461,12 +463,15 @@ AWS CLI v2, Docker (`docker.io` on Ubuntu 24.04), Multipass for integration.
     `ENTRY_AWG_PORT`, `BRIDGES="docker0 amn0"`):
     - `/etc/iproute2/rt_tables.d/multihop.conf` contains `51820 multihop`;
     - table 51820 has `blackhole default metric 4096`;
-    - `ip rule` priorities 10100–10130 as in the Global Constraints. For
-      each bridge, the 10110 rule is
-      `iif <br> ipproto udp sport $ENTRY_AWG_PORT lookup main`;
+    - `ip rule` priorities 10100–10130 as in the Global Constraints. The
+      10110 rule is `fwmark 0x5b00/0xff00 lookup main`;
     - mangle `MULTIHOP-MARK`, jumped from PREROUTING for each bridge:
-      `force_exit` set → RETURN, then `direct` set → MARK `0x5a/0xff`. Both
-      ipsets are created empty if missing (`hash:net`);
+      `-p udp --sport $ENTRY_AWG_PORT` → MARK `0x5b00/0xff00` (AWG server
+      traffic, both directions), then `force_exit` set → RETURN, then
+      `direct` set → MARK `0x5a/0xff`. Both ipsets are created empty if
+      missing (`hash:net`). This relies on the `amnezia-awg2` start.sh
+      (Task 6) masquerading user UDP into a port range that excludes
+      `entry_awg_port`;
     - filter `MULTIHOP-FWD`, jumped from `DOCKER-USER`, per bridge:
       - `-i br -o PUBLIC_IFACE -m mark --mark 0x5a/0xff -j RETURN`;
       - `-i br -o PUBLIC_IFACE -p udp --sport ENTRY_AWG_PORT -j RETURN`;

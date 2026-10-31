@@ -12,11 +12,16 @@
 # MULTIHOP-FWD (from DOCKER-USER) is the backstop: bridge -> public interface
 # is dropped unless direct-marked or an AWG reply.
 #
-# An "AWG reply" is only a packet in the REPLY direction of a DNAT'd flow
-# (Docker's published ENTRY_AWG_PORT/udp), never merely "UDP with source port
-# ENTRY_AWG_PORT": a user flow can keep that source port through the app
-# container's MASQUERADE and must still go via the uplink. The reply mark has
-# its own byte (mask 0xff00), disjoint from the direct mark's (0xff).
+# "AWG traffic" is UDP from a bridge with source port ENTRY_AWG_PORT, in
+# either conntrack direction: replies, and packets the AWG server sends after
+# the host's conntrack entry for a client expired, both must leave via the
+# entry IP. This identifies only the AWG socket because the app container's
+# start.sh (entry_app role) masquerades user UDP into a port range that
+# excludes ENTRY_AWG_PORT. An app reinstall of amnezia-awg2 (forbidden and
+# drift-detected) would drop that rule and with it this guarantee: user UDP
+# flows from that port would then leave via the entry IP.
+# The reply mark has its own byte (mask 0xff00), disjoint from the direct
+# mark's (0xff).
 #
 # Ordering inside `up` is part of the guarantee: the firewall backstop and the
 # blackhole route are in place before any ip rule is touched, every iptables
@@ -39,7 +44,7 @@ TABLE=51820
 TABLE_NAME=multihop
 DIRECT_MARK=0x5a/0xff
 REPLY_MARK=0x5b00/0xff00
-AWG_REPLY="-p udp --sport $ENTRY_AWG_PORT -m conntrack --ctstate DNAT --ctdir REPLY"
+AWG_UDP="-p udp --sport $ENTRY_AWG_PORT"
 DIRECT_SET=multihop_direct
 FORCE_EXIT_SET=multihop_force_exit
 RULE_PREFS="10100 10110 10120 10130"
@@ -107,7 +112,7 @@ fwd_rules() {
   local br
   for br in $BRIDGES; do
     echo "-i $br -o $PUBLIC_IFACE -m mark --mark $DIRECT_MARK -j RETURN"
-    echo "-i $br -o $PUBLIC_IFACE $AWG_REPLY -j RETURN"
+    echo "-i $br -o $PUBLIC_IFACE $AWG_UDP -j RETURN"
   done
   for br in $BRIDGES; do
     echo "-i $br -o $PUBLIC_IFACE -j DROP"
@@ -173,7 +178,7 @@ up() {
   local br jumps=()
   for br in $BRIDGES; do jumps+=("-i $br"); done
   install_chain mangle PREROUTING MULTIHOP-MARK "${jumps[@]}" <<RULES
-$AWG_REPLY -j MARK --set-mark $REPLY_MARK
+$AWG_UDP -j MARK --set-mark $REPLY_MARK
 -m set --match-set $FORCE_EXIT_SET dst -j RETURN
 -m set --match-set $DIRECT_SET dst -j MARK --set-mark $DIRECT_MARK
 RULES

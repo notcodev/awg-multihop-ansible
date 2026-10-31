@@ -114,9 +114,9 @@ R
 expected_fwd() {
   cat <<'R'
 -i docker0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
--i docker0 -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN
+-i docker0 -o eth9 -p udp --sport 51470 -j RETURN
 -i amn0 -o eth9 -m mark --mark 0x5a/0xff -j RETURN
--i amn0 -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN
+-i amn0 -o eth9 -p udp --sport 51470 -j RETURN
 -i docker0 -o eth9 -j DROP
 -i amn0 -o eth9 -j DROP
 R
@@ -166,7 +166,7 @@ snapshot() {
   for br in docker0 amn0; do
     f="$IPT_DIR/filter.MULTIHOP-FWD"
     mark=$(grep -n -x -e "-i $br -o eth9 -m mark --mark 0x5a/0xff -j RETURN" "$f" | cut -d: -f1)
-    reply=$(grep -n -x -e "-i $br -o eth9 -p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j RETURN" "$f" | cut -d: -f1)
+    reply=$(grep -n -x -e "-i $br -o eth9 -p udp --sport 51470 -j RETURN" "$f" | cut -d: -f1)
     drop=$(grep -n -x -e "-i $br -o eth9 -j DROP" "$f" | cut -d: -f1)
     [ -n "$mark" ] && [ -n "$reply" ] && [ -n "$drop" ]
     [ "$mark" -lt "$drop" ] && [ "$reply" -lt "$drop" ]
@@ -179,7 +179,7 @@ snapshot() {
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
   diff "$IPT_DIR/mangle.MULTIHOP-MARK" - <<'R'
--p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j MARK --set-mark 0x5b00/0xff00
+-p udp --sport 51470 -j MARK --set-mark 0x5b00/0xff00
 -m set --match-set multihop_force_exit dst -j RETURN
 -m set --match-set multihop_direct dst -j MARK --set-mark 0x5a/0xff
 R
@@ -197,19 +197,20 @@ R
   done
 }
 
-@test "awg reply is identified by conntrack, not by source port" {
+@test "awg traffic is marked by source port and routed by the reply mark" {
   run_script multihop-entry-net up
   [ "$status" -eq 0 ]
-  # only REPLY-direction packets of a DNAT'd flow get the reply mark
-  grep -qxF -e '-p udp --sport 51470 -m conntrack --ctstate DNAT --ctdir REPLY -j MARK --set-mark 0x5b00/0xff00' \
-    "$IPT_DIR/mangle.MULTIHOP-MARK"
-  [ "$(grep -c -e '--sport' "$IPT_DIR/mangle.MULTIHOP-MARK")" -eq 1 ]
+  # UDP from the AWG port gets the reply mark in both conntrack directions
+  # (the app container keeps user UDP off that port, see entry_app start.sh)
+  [ "$(head -n1 "$IPT_DIR/mangle.MULTIHOP-MARK")" = "-p udp --sport 51470 -j MARK --set-mark 0x5b00/0xff00" ]
+  ! grep -q -e conntrack "$IPT_DIR/mangle.MULTIHOP-MARK" "$IPT_DIR/filter.MULTIHOP-FWD" || false
   # routing exception keys on that mark only
   grep -qx -e '10110 fwmark 0x5b00/0xff00 lookup main' "$IP_DIR/rules"
   ! grep -q -e 'sport\|ipproto' "$IP_DIR/rules" || false
-  # every --sport RETURN in the backstop also requires the conntrack match
-  [ "$(grep -c -e '--sport 51470' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 2 ]
-  ! grep -e '--sport' "$IPT_DIR/filter.MULTIHOP-FWD" | grep -v -e '-m conntrack --ctstate DNAT --ctdir REPLY -j RETURN$' || false
+  # backstop lets exactly that through, per bridge, to the public iface only
+  [ "$(grep -c -e '--sport' "$IPT_DIR/filter.MULTIHOP-FWD")" -eq 2 ]
+  grep -qx -e '-i docker0 -o eth9 -p udp --sport 51470 -j RETURN' "$IPT_DIR/filter.MULTIHOP-FWD"
+  grep -qx -e '-i amn0 -o eth9 -p udp --sport 51470 -j RETURN' "$IPT_DIR/filter.MULTIHOP-FWD"
   # reply mark and direct mark use disjoint mask bytes
   ! grep -q -e '0x5b00/0xff ' "$IPT_DIR/mangle.MULTIHOP-MARK" || false
 }
@@ -316,7 +317,7 @@ ENV
 R
   ! grep -q amn0 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.PREROUTING" || false
   ! grep -q 51470 "$IPT_DIR/filter.MULTIHOP-FWD" "$IPT_DIR/mangle.MULTIHOP-MARK" || false
-  grep -q -e '--sport 40000 -m conntrack' "$IPT_DIR/filter.MULTIHOP-FWD"
+  grep -qx -e '-i docker0 -o eth9 -p udp --sport 40000 -j RETURN' "$IPT_DIR/filter.MULTIHOP-FWD"
 }
 
 @test "down removes rules, routes and chains" {
