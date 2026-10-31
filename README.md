@@ -37,7 +37,7 @@ Controller (macOS or Linux):
 - `dig` (the DNS step checks resolvers)
 - development only: `bats-core`, `shellcheck` (`make test lint`)
 
-Servers: two Ubuntu 24.04 hosts with SSH and sudo. Set `ansible_host` of the entry and exit to their **public IPv4 address** (swap playbooks and the DNS step check this).
+Servers: two Ubuntu 24.04 hosts with SSH and sudo. Set `ansible_host` of the entry and exit to their **public IPv4 address**. Only the swap playbooks assert this; the DNS step simply uses `ansible_host` as the record's IP and `site.yml` does not check it, but it must be the public IPv4 either way.
 
 S3: a **dedicated bucket** with **versioning enabled** (enable it in the provider; the entry's writer key can overwrite or delete objects, versioning is what covers that). Two credential sets: a writer (goes on the entry) and a reader (controller only). They can be the same key if the provider cannot separate them.
 
@@ -50,7 +50,7 @@ S3: a **dedicated bucket** with **versioning enabled** (enable it in the provide
    $EDITOR inventories/prod/hosts.yml inventories/prod/group_vars/all/vars.yml
    ```
 
-   Set `entry_domain`, `exit_domain`, ports, `backup_*`, and `awg_base_image_digest` (see "Updating the pinned image"). Point `inventory` in `ansible.cfg` at it or pass `-i inventories/prod`.
+   In `hosts.yml` set `ansible_user` (a user with sudo) and your SSH key setup (`ansible_ssh_private_key_file` or an agent), and `ansible_port` / `ssh_port` if SSH is not on 22 (`ssh_port` also opens it in the host firewall). Set `entry_domain`, `exit_domain`, ports, `backup_*` (except `backup_age_recipient`, which comes after step 3), and `awg_base_image_digest` (see "Updating the pinned image"). Point `inventory` in `ansible.cfg` at it or pass `-i inventories/prod`.
 
 2. Vault password: put it in `.vault-pass` (gitignored; `ansible.cfg` reads it) or set `ANSIBLE_VAULT_PASSWORD_FILE`.
 
@@ -64,7 +64,7 @@ S3: a **dedicated bucket** with **versioning enabled** (enable it in the provide
    uv run ansible-vault encrypt inventories/prod/group_vars/all/vault.yml inventories/prod/group_vars/all/vault_uplink.yml
    ```
 
-   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `age.key`). Put the age **public** key in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
+   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `age.key`). Only now put the age **public** key (printed by `age-keygen`) in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
 
 4. Create DNS A records for `entry_domain` and `exit_domain` pointing at the servers, with a **low TTL (60-300 s)**. The exit swap and the entry re-resolve timer rely on it.
 
@@ -88,12 +88,13 @@ The fail-closed test stops `multihop-uplink` and checks that `amnezia-awg2` cann
 
 ## Adding the server in the Amnezia app
 
-Add the server by **domain** (`entry_domain`) with an SSH user that has sudo. The app detects AmneziaWG as already installed (it shows "version 3.1"). Then add users and share keys as usual.
+Add the server by **domain** (`entry_domain`) with an SSH user that has sudo. The app detects AmneziaWG as already installed (expected to show "version 3.1": the Amnezia client labels a server that way when its `awg0.conf` carries the 3.1 options such as `HeaderProtectionKey` and `RekeyAfterTime`, which this setup writes; see `hasAwg3Markers` in amnezia-client `awgProtocolConfig.cpp`; expected behaviour, not a guarantee). Then add users and share keys as usual.
 
 ## Rules for the entry
 
 - The entry runs only `amnezia-awg2` and `multihop-uplink`. Do not add other containers to its Docker bridges: the fail-closed exception for the AWG server's replies assumes `amnezia-awg2` is the only UDP sender on `docker0`/`amn0`.
 - **Do not use the app's "remove / reinstall protocol", and do not edit AmneziaWG settings in the app.** The app reinstalls the container: new server keys, an empty user list, and our bind mount and the fixed NAT port range are gone. Every issued key stops working.
+- Reinstalling also removes the container's fixed NAT port range, the basis of the AWG UDP reply exception, so user UDP from source port `entry_awg_port` could then leave via the entry's own IP.
 - Drift detection: the backup timer checks every run that `amnezia-awg2` still has the bind mount. If not, `multihop-backup` exits with code 2 and writes `/var/lib/multihop/backup/DRIFT`, and `entry.yml` fails with recovery instructions. Look for it with `systemctl status multihop-backup.service` and `journalctl -u multihop-backup`.
 
 ## Recovery
@@ -139,11 +140,17 @@ It deploys the exit, updates the DNS record for `exit_domain` (manual backend: i
 - **Old entry reachable:** takes a final backup, stops the old app, uplink and backup timer (they stay stopped across reboots), then restores exactly that backup on the new entry. No users are lost.
 - **Old entry unreachable:** rotates the entry-uplink key into `vault_uplink.yml`, redeploys the exit so it accepts only the new key, and restores `latest`. Users added after the last backup are lost. Keep the rewritten `vault_uplink.yml`. This step needs a vault password **file** (`.vault-pass` or `ANSIBLE_VAULT_PASSWORD_FILE`); `--ask-vault-pass` is not supported.
 
-Both cases then deploy the entry, update the DNS record for `entry_domain`, and verify. Add `-e backup_object=entry-<ts>.tar.age` to restore a specific backup. After the swap, update the server in the app only if it was added by IP; by domain nothing changes.
+Both cases then deploy the entry, update the DNS record for `entry_domain`, and verify. `-e backup_object=entry-<ts>.tar.age` restores a specific backup; in the reachable case it overrides the pinned final backup and can discard users added since that backup. After the swap, update the server in the app only if it was added by IP; by domain nothing changes.
 
 ## Manual rekey of the entry protocol parameters
 
-There is no rekey playbook. Edit `params` in `vault_entry_awg`, delete `/var/lib/multihop/entry-awg/awg0.conf` on the entry, and run `entry.yml` again. This **invalidates every issued user key**; users must get new keys from the app.
+There is no rekey playbook, and this wipes all users. The rendered `awg0.conf` contains only `[Interface]`, so recreating it drops every peer the app added; the running server also keeps the old parameters until the container restarts (`start.sh` runs `awg-quick` only at container start).
+
+1. Edit `params` in `vault_entry_awg`.
+2. On the entry, delete `/var/lib/multihop/entry-awg/awg0.conf` **and** `/var/lib/multihop/entry-awg/clientsTable` (otherwise the app's user list goes stale). All users are gone and every issued key is invalid.
+3. `uv run ansible-playbook playbooks/entry.yml`
+4. On the entry: `docker restart amnezia-awg2`
+5. Re-create the users in the app and re-share their keys. The next backup captures the new state.
 
 ## Split routing variables
 
@@ -152,13 +159,13 @@ In `group_vars/all/vars.yml`:
 | Variable | Meaning |
 |---|---|
 | `split_routing_enabled` | `true`/`false`; off sends everything through the exit |
-| `split_direct_countries` | country codes whose IP ranges leave directly from the entry (default `[ru]`) |
+| `split_direct_countries` | country codes whose IP ranges leave directly from the entry (example inventory value `[ru]`; the role default is empty) |
 | `split_country_list_url` | list source, `{cc}` is the country code |
 | `split_direct_cidrs` | extra networks that go direct |
 | `split_direct_domains` | domains whose addresses go direct (re-resolved every 10 min) |
 | `split_force_exit_cidrs` | networks forced through the exit even if they are in a direct list |
 
-Country lists refresh every 24 h. A failed or garbage download keeps the previous set. Apply changes with `uv run ansible-playbook playbooks/entry.yml`. Other useful variables: `extra_input_tcp_ports` (extra open TCP ports in the host firewall), `uplink_mtu` (default 1280), `backup_interval` (default `15min`).
+Country lists refresh every 24 h. A failed or garbage download keeps the previous set. Apply changes with `uv run ansible-playbook playbooks/entry.yml`. Other useful variables: `extra_input_tcp_ports` (extra open TCP ports in the host firewall), `uplink_mtu` (example inventory value 1280; no role default), `backup_interval` (default `15min`).
 
 ## DNS
 
