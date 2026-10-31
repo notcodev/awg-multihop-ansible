@@ -572,7 +572,7 @@ ck_container_direct() { # brief 3.6
 
 s3_creds() { # reader keys from the vault, as "access secret" (never printed)
   uv run ansible -i "$INV" entry1 -m debug \
-    -a 'msg={{ vault_backup_reader.access_key }} {{ vault_backup_reader.secret_key }}' 2>/dev/null \
+    -a 'msg="{{ vault_backup_reader.access_key }} {{ vault_backup_reader.secret_key }}"' 2>/dev/null \
     | awk -F'"' '/"msg"/ { print $4 }'
 }
 
@@ -580,7 +580,7 @@ s3_count() { # s3_count <access> <secret>: object versions under <prefix>/entry-
   AWS_ACCESS_KEY_ID="$1" AWS_SECRET_ACCESS_KEY="$2" AWS_DEFAULT_REGION="$(labvar backup_s3_region)" \
     aws --endpoint-url "$(labvar backup_s3_endpoint)" s3api list-object-versions \
     --bucket "$(labvar backup_s3_bucket)" --prefix "$(labvar backup_s3_prefix)/entry-" \
-    --query 'length(Versions)' --output text
+    --query 'length(Versions || `[]`)' --output text
 }
 
 s3_ready() { # backup checks need .state/s3.env (then `run.sh init` and entry.yml)
@@ -593,7 +593,7 @@ ck_backup() { # brief 3.7
   local creds n0 n1 n2 out
   s3_ready backup || return
   read -r -a creds <<<"$(s3_creds)"
-  n0=$(s3_count "${creds[@]}"); [ "$n0" = None ] && n0=0
+  n0=$(s3_count "${creds[@]}")
   ap backup playbooks/backup.yml || { result FAIL backup "backup.yml failed, see $LOGS/backup.log"; return; }
   n1=$(s3_count "${creds[@]}")
   on "$ENTRY_IP" systemctl start multihop-backup
