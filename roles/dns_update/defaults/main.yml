@@ -1,7 +1,7 @@
 ---
-dns_backend: manual
-dns_record: ""
-dns_ip: ""
-dns_poll_retries: 60
-dns_poll_delay: 10
-dns_resolvers: ["1.1.1.1", "8.8.8.8"]
+dns_backend: manual  # noqa: var-naming[no-role-prefix]
+dns_record: ""  # noqa: var-naming[no-role-prefix]
+dns_ip: ""  # noqa: var-naming[no-role-prefix]
+dns_poll_retries: 60  # noqa: var-naming[no-role-prefix]
+dns_poll_delay: 10  # noqa: var-naming[no-role-prefix]
+dns_resolvers: ["1.1.1.1", "8.8.8.8"]  # noqa: var-naming[no-role-prefix]

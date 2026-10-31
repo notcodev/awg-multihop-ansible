@@ -33,14 +33,13 @@
       become: false
 
     - name: Read latest pointer (S3)
-      ansible.builtin.command: "{{ _fb_s3_cmd }} s3://{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/latest -"
+      ansible.builtin.command: "{{ _fb_s3_cmd }} {{ ('s3://' ~ backup_s3_bucket ~ '/' ~ backup_s3_prefix ~ '/latest') | quote }} -"
       environment:
         AWS_ACCESS_KEY_ID: "{{ vault_backup_reader.access_key }}"
         AWS_SECRET_ACCESS_KEY: "{{ vault_backup_reader.secret_key }}"
         AWS_DEFAULT_REGION: "{{ backup_s3_region }}"
       register: _fb_latest_s3
       changed_when: false
-      no_log: true
       delegate_to: localhost
       become: false
       when: not _fb_local | bool and (backup_object | default('') | length == 0)
@@ -73,13 +72,12 @@
         fail_msg: "Invalid backup object key '{{ _fb_key }}'"
 
     - name: Download encrypted backup (S3)
-      ansible.builtin.command: "{{ _fb_s3_cmd }} s3://{{ backup_s3_bucket }}/{{ _fb_key }} {{ (_fb_dir.path ~ '/backup.tar.age') | quote }}"
+      ansible.builtin.command: "{{ _fb_s3_cmd }} {{ ('s3://' ~ backup_s3_bucket ~ '/' ~ _fb_key) | quote }} {{ (_fb_dir.path ~ '/backup.tar.age') | quote }}"
       environment:
         AWS_ACCESS_KEY_ID: "{{ vault_backup_reader.access_key }}"
         AWS_SECRET_ACCESS_KEY: "{{ vault_backup_reader.secret_key }}"
         AWS_DEFAULT_REGION: "{{ backup_s3_region }}"
       changed_when: true
-      no_log: true
       delegate_to: localhost
       become: false
       when: not _fb_local | bool
@@ -175,7 +173,10 @@
 
     - name: Fail
       ansible.builtin.fail:
-        msg: "Fetching backup failed: {{ ansible_failed_result.msg | default('see above') }}"
+        msg: >-
+          Fetching backup failed in task '{{ ansible_failed_task.name | default('?') }}':
+          {{ ansible_failed_result.msg | default('') }}
+          {{ ansible_failed_result.stderr | default('') | trim }}
 
   always:
     - name: Remove age identity temp file
