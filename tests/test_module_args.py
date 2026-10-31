@@ -62,3 +62,28 @@ def test_module_args_exist():
            # raw-params modules (command/shell) take free-form args
            if module in options and args - options[module] - {"_raw_params", "cmd", "argv"}]
     assert not bad, "unknown module options:\n" + "\n".join(bad)
+
+
+def test_no_digest_reference_removal_through_community_docker():
+    # docker_image(state=absent)/docker_image_remove turn `repo@sha256:...` into
+    # `repo:sha256:...`, which the daemon rejects ("invalid reference format").
+    bad = []
+    for path in TASK_FILES:
+        doc = yaml.safe_load(path.read_text())
+        for item in _walk(doc if isinstance(doc, list) else []):
+            for mod in ("community.docker.docker_image", "community.docker.docker_image_remove"):
+                args = item.get(mod)
+                if not isinstance(args, dict) or "@" not in str(args.get("name", "")):
+                    continue
+                if mod.endswith("_remove") or args.get("state") == "absent":
+                    bad.append(f"{path.relative_to(ROOT)}: {item.get('name')}")
+    assert not bad, bad
+
+
+def _walk(items):
+    for item in items or []:
+        if isinstance(item, dict):
+            yield item
+            for key in NESTED:
+                if isinstance(item.get(key), list):
+                    yield from _walk(item[key])

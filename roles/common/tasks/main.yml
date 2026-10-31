@@ -74,11 +74,14 @@
         existing_images: overwrite
 
     # Keep `docker images` free of the upstream name; only the digest
-    # reference is removed, the multihop tag stays.
+    # reference is removed, the multihop tag stays. `docker rmi` because the
+    # community.docker modules rewrite repo@digest into an invalid repo:digest.
     - name: Remove upstream reference (untag only)
-      community.docker.docker_image:
-        name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
-        state: absent
+      ansible.builtin.command:
+        argv: [docker, rmi, "{{ common_base_image }}@{{ awg_base_image_digest }}"]
+      register: common_untag
+      changed_when: "'Untagged' in common_untag.stdout"
+      failed_when: common_untag.rc != 0 and 'No such image' not in common_untag.stderr
 
     - name: Record applied base image digest
       ansible.builtin.copy:
