@@ -173,7 +173,7 @@ Country lists refresh every 24 h. A failed or garbage download keeps the previou
 
 To add a provider backend, create `roles/dns_update/tasks/backend_<name>.yml` and set `dns_backend: <name>`. It receives `dns_record` (fqdn) and `dns_ip`. The role verifies resolution afterwards, so the backend only has to make the change.
 
-`dns_backend: hostsfile` is a lab/testing backend (used by the Multipass integration test): instead of a DNS record it writes `<dns_ip> <dns_record>` into `/etc/hosts` on the hosts in the `entry` group, where `multihop-reresolve` resolves the exit domain, and skips the public-resolver check. Do not use it in production.
+`dns_backend: hostsfile` is a lab/testing backend (used by the cloud-lab integration test): instead of a DNS record it writes `<dns_ip> <dns_record>` into `/etc/hosts` on the hosts in the `entry` group, where `multihop-reresolve` resolves the exit domain, and skips the public-resolver check. Do not use it in production. The pinned line stays in `/etc/hosts` when you switch to another backend and shadows real DNS for that name; delete it by hand.
 
 ## Updating the pinned image
 
