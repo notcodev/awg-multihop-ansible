@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh the multihop split-routing ipsets
+After=network-online.target multihop-net.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/multihop-split-refresh

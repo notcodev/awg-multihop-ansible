@@ -1,0 +1,8 @@
+---
+# Inventory-contract names (no role prefix by design).
+split_routing_enabled: true
+split_direct_countries: []  # noqa: var-naming[no-role-prefix]
+split_country_list_url: "https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone"  # noqa: var-naming[no-role-prefix]
+split_direct_cidrs: []  # noqa: var-naming[no-role-prefix]
+split_direct_domains: []  # noqa: var-naming[no-role-prefix]
+split_force_exit_cidrs: []  # noqa: var-naming[no-role-prefix]

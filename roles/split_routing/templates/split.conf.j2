@@ -1,0 +1,6 @@
+# Managed by Ansible. Sourced by multihop-split-refresh.
+COUNTRIES="{{ split_direct_countries | map('lower') | join(' ') }}"
+URL="{{ split_country_list_url }}"
+DIRECT_CIDRS="{{ split_direct_cidrs | join(' ') }}"
+DIRECT_DOMAINS="{{ split_direct_domains | join(' ') }}"
+FORCE_EXIT_CIDRS="{{ split_force_exit_cidrs | join(' ') }}"

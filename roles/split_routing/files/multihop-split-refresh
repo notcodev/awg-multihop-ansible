@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Refresh the split-routing ipsets on the entry server.
+#
+#   multihop_direct      country lists + direct CIDRs + A records of the direct
+#                        domains (matched by multihop-entry-net's mangle rules,
+#                        packets leave from the entry's own IP)
+#   multihop_force_exit  force-exit CIDRs (always via the exit; wins over direct)
+#
+# Safety rules:
+#   * Sets are rebuilt in a temporary set and `ipset swap`ped in, so a reader
+#     never sees a half-filled or empty set. Nothing ever flushes a live set.
+#   * Country lists are cached under $STATE/split/<cc>.zone. A download is
+#     written to a temp file, validated (at least one line, every non-empty
+#     line a CIDR/IPv4), and only then moved into the cache. Anything else
+#     (HTTP error, HTML page, empty body, partial file) keeps the old cache.
+#   * 0.0.0.0/0 (any /0) is never accepted from any source. DNS answers must
+#     be plain IPv4 addresses (dig may print CNAME targets or garbage).
+#   * If sources are configured but nothing usable could be collected, the
+#     live set is left as it is.
+#
+# Usage: multihop-split-refresh [--force-countries]
+set -euo pipefail
+
+SPLIT_CONF="${MULTIHOP_SPLIT_CONF:-/etc/multihop/split.conf}"
+STATE_DIR="${MULTIHOP_STATE_DIR:-/var/lib/multihop}"
+DIRECT_SET=multihop_direct
+FORCE_EXIT_SET=multihop_force_exit
+CACHE_MAX_AGE_MIN=1440
+
+force=0
+case "${1:-}" in
+  "") ;;
+  --force-countries) force=1 ;;
+  *) echo "usage: multihop-split-refresh [--force-countries]" >&2; exit 2 ;;
+esac
+
+COUNTRIES="" URL="" DIRECT_CIDRS="" DIRECT_DOMAINS="" FORCE_EXIT_CIDRS=""
+# shellcheck disable=SC1090
+. "$SPLIT_CONF"
+
+CACHE_DIR="$STATE_DIR/split"
+mkdir -p "$CACHE_DIR"
+
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$CACHE_DIR/.lock"
+  flock -n 9 || { echo "another refresh is running" >&2; exit 0; }
+fi
+
+WORK="$(mktemp -d "$CACHE_DIR/.work.XXXXXX")"
+# shellcheck disable=SC2329
+cleanup() {
+  rm -rf "$WORK"
+  ipset destroy "${DIRECT_SET}_new" 2>/dev/null || true
+  ipset destroy "${FORCE_EXIT_SET}_new" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# cidr_filter strict|lenient: read lines on stdin, print valid IPv4[/len]
+# entries (never /0). strict exits 1 on any non-empty invalid line or when no
+# entry was seen; lenient warns about invalid lines and skips them.
+cidr_filter() {
+  awk -v mode="$1" '
+    function valid(s,   a, n, i, p) {
+      p = -1
+      if (s ~ /\//) {
+        n = split(s, a, "/")
+        if (n != 2 || a[2] !~ /^[0-9]+$/ || length(a[2]) > 2) return 0
+        p = a[2] + 0
+        s = a[1]
+        if (p < 1 || p > 32) return 0
+      }
+      if (s !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
+      n = split(s, a, ".")
+      for (i = 1; i <= 4; i++) if (length(a[i]) > 3 || a[i] + 0 > 255) return 0
+      if (s == "0.0.0.0") return 0
+      return 1
+    }
+    { gsub(/[ \t\r]/, "") }
+    $0 == "" { next }
+    valid($0) { print; seen++; next }
+    { bad++
+      if (mode == "lenient") print "skipping invalid entry: " substr($0, 1, 60) > "/dev/stderr" }
+    END { if (mode == "strict" && (bad > 0 || seen == 0)) exit 1 }
+  '
+}
+
+# Download <cc> into the cache when missing, stale or forced. A failed or
+# invalid download leaves the existing cache untouched.
+refresh_country() {
+  local cc="$1" cache tmp url
+  cache="$CACHE_DIR/$cc.zone"
+  if [ "$force" -eq 0 ] && [ -s "$cache" ] \
+    && [ -z "$(find "$cache" -mmin +"$CACHE_MAX_AGE_MIN" 2>/dev/null)" ]; then
+    return 0
+  fi
+  url="${URL//\{cc\}/$cc}"
+  tmp="$WORK/$cc.download"
+  if ! curl -fsSL --max-time 120 -o "$tmp" "$url"; then
+    echo "download failed for $cc, keeping previous cache" >&2
+    return 0
+  fi
+  if ! cidr_filter strict < "$tmp" > "$WORK/$cc.valid" 2>/dev/null; then
+    echo "downloaded list for $cc is not a valid CIDR list, keeping previous cache" >&2
+    return 0
+  fi
+  mv -f "$WORK/$cc.valid" "$cache"
+}
+
+# resolve <domain>: print validated IPv4 A records.
+resolve_domain() {
+  local out
+  out="$(dig +short +time=3 +tries=2 A "$1" 2>/dev/null)" || return 0
+  printf '%s\n' "$out" | tr -d '\r' | awk '
+    /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+      n = split($0, a, ".")
+      for (i = 1; i <= 4; i++) if (length(a[i]) > 3 || a[i] + 0 > 255) next
+      if ($0 == "0.0.0.0") next
+      print
+    }'
+}
+
+# build_set <set> <entries-file>: fill <set>_new and swap it in. Returns 1 when
+# the live set was left alone.
+build_set() {
+  local set="$1" entries="$2" tmpset="${1}_new"
+  sort -u "$entries" -o "$entries"
+  ipset create "$set" hash:net -exist
+  ipset destroy "$tmpset" 2>/dev/null || true
+  ipset create "$tmpset" hash:net
+  if ! awk -v s="$tmpset" '{ print "add " s " " $0 }' "$entries" | ipset restore -exist; then
+    echo "loading $tmpset failed, keeping live $set" >&2
+    ipset destroy "$tmpset" 2>/dev/null || true
+    return 1
+  fi
+  ipset swap "$tmpset" "$set"
+  ipset destroy "$tmpset"
+}
+
+rc=0
+
+# --- multihop_direct ---------------------------------------------------------
+direct="$WORK/direct.entries"
+: > "$direct"
+for cc in $COUNTRIES; do
+  cc="$(printf '%s' "$cc" | tr '[:upper:]' '[:lower:]')"
+  if ! [[ "$cc" =~ ^[a-z]{2}$ ]]; then
+    echo "ignoring invalid country code: $cc" >&2
+    continue
+  fi
+  refresh_country "$cc"
+  if [ -s "$CACHE_DIR/$cc.zone" ]; then
+    cidr_filter lenient < "$CACHE_DIR/$cc.zone" >> "$direct" || true
+  else
+    echo "no list available for $cc" >&2
+  fi
+done
+# shellcheck disable=SC2086
+printf '%s\n' $DIRECT_CIDRS | cidr_filter lenient >> "$direct" || true
+for d in $DIRECT_DOMAINS; do
+  resolve_domain "$d" >> "$direct"
+done
+
+if [ ! -s "$direct" ] && [ -n "${COUNTRIES}${DIRECT_CIDRS}${DIRECT_DOMAINS}" ]; then
+  echo "no usable direct entries collected, keeping live $DIRECT_SET" >&2
+  ipset create "$DIRECT_SET" hash:net -exist
+  rc=1
+else
+  build_set "$DIRECT_SET" "$direct" || rc=1
+fi
+
+# --- multihop_force_exit -----------------------------------------------------
+force_exit="$WORK/force_exit.entries"
+: > "$force_exit"
+# shellcheck disable=SC2086
+printf '%s\n' $FORCE_EXIT_CIDRS | cidr_filter lenient >> "$force_exit" || true
+if [ ! -s "$force_exit" ] && [ -n "$FORCE_EXIT_CIDRS" ]; then
+  echo "no valid force-exit entries, keeping live $FORCE_EXIT_SET" >&2
+  ipset create "$FORCE_EXIT_SET" hash:net -exist
+  rc=1
+else
+  build_set "$FORCE_EXIT_SET" "$force_exit" || rc=1
+fi
+
+exit "$rc"

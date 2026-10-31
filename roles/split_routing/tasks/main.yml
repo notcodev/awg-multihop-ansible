@@ -1,0 +1,58 @@
+---
+- name: Install split routing
+  when: split_routing_enabled | bool
+  block:
+    - name: Write split.conf
+      ansible.builtin.template:
+        src: split.conf.j2
+        dest: /etc/multihop/split.conf
+        mode: "0644"
+        owner: root
+        group: root
+
+    - name: Install multihop-split-refresh
+      ansible.builtin.copy:
+        src: multihop-split-refresh
+        dest: /usr/local/sbin/multihop-split-refresh
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Install refresh units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+        owner: root
+        group: root
+      loop:
+        - multihop-split-refresh.service
+        - multihop-split-refresh.timer
+
+    - name: Reload systemd units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    # Fill the sets now, not 30s after boot. Fails soft: a failed download
+    # keeps the previous (or static-only) set and the timer retries.
+    - name: Run the first refresh
+      ansible.builtin.command: /usr/local/sbin/multihop-split-refresh
+      changed_when: true
+      failed_when: false
+
+    - name: Enable and start refresh timer
+      ansible.builtin.systemd_service:
+        name: multihop-split-refresh.timer
+        enabled: true
+        state: started
+
+# Disabled: install nothing and empty both sets (they may not exist yet).
+- name: Flush split routing sets
+  ansible.builtin.command: "ipset flush {{ item }}"
+  loop:
+    - multihop_direct
+    - multihop_force_exit
+  register: split_routing_flush
+  changed_when: split_routing_flush.rc == 0
+  failed_when: split_routing_flush.rc != 0 and 'does not exist' not in split_routing_flush.stderr
+  when: not (split_routing_enabled | bool)
