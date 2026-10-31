@@ -193,7 +193,8 @@ print("S3: " + ("configured from " + str(s3env) if configured else "not configur
 PY
   ) || die "writing the S3 settings failed"
   uv run ansible-vault encrypt "$gv/vault_s3.yml" >/dev/null || die "encrypting vault_s3.yml failed"
-  write_hosts exit1 ""
+  # After `swap`, EXIT2 stays the exit.
+  if [ -f "$STATE/swapped" ]; then write_hosts exit2 exit1; else write_hosts exit1 ""; fi
   uv run ansible-inventory -i "$INV" --graph
 }
 
@@ -540,7 +541,7 @@ container_direct backup drift"
 
 cmd_check() {
   need ENTRY_IP EXIT_IP CLIENT_IP
-  EXIT_NOW="${EXIT_NOW:-$EXIT_IP}"
+  if [ -f "$STATE/swapped" ]; then EXIT_NOW="${EXIT_NOW:-$EXIT2_IP}"; else EXIT_NOW="${EXIT_NOW:-$EXIT_IP}"; fi
   local c
   # shellcheck disable=SC2086 # default list is word-split on purpose
   [ "$#" -gt 0 ] || set -- $CHECKS
@@ -557,6 +558,7 @@ cmd_swap() {
   need ENTRY_IP EXIT_IP EXIT2_IP
   local pins ep c tasks
   write_hosts exit2 exit1
+  touch "$STATE/swapped"
   if ap swap playbooks/swap-exit.yml; then
     c=$(recap swap entry1 changed)
     tasks=$(awk '/^PLAY \[/ { p = $0 } /^(ok|changed): \[entry1\]/ { print p }' "$LOGS/swap.log" | sort -u | paste -sd';' -)
