@@ -685,8 +685,10 @@ ck_docker_blocked() { # Docker must not start on the entry when the entry rules 
   local st
   st=$(on "$ENTRY_IP" 'chmod -x /usr/local/sbin/multihop-entry-net; systemctl restart docker 2>/dev/null; rc=$?
     echo "restart_rc=$rc docker=$(systemctl is-active docker) app=$(docker inspect -f {{.State.Running}} amnezia-awg2 2>/dev/null || echo none)"
-    chmod +x /usr/local/sbin/multihop-entry-net; systemctl start docker')
-  if [[ "$st" == *"docker=failed"* || "$st" == *"docker=inactive"* ]] && [[ "$st" != *"app=true"* ]] \
+    chmod +x /usr/local/sbin/multihop-entry-net
+    systemctl reset-failed docker docker.socket; systemctl start docker')  # past the start rate limit
+  # Docker keeps retrying its ExecStartPre ("activating") or gives up ("failed").
+  if [[ "$st" =~ docker=(failed|inactive|activating) ]] && [[ "$st" != *"app=true"* ]] \
      && [[ "$st" != *"restart_rc=0"* ]] && wait_uplink && wait_client; then
     result PASS docker_blocked "multihop-entry-net not runnable: $st; after fixing it Docker and the client are back"
   else
