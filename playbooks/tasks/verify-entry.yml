@@ -24,6 +24,36 @@
       /etc/udev/rules.d/90-multihop-public-group.rules.
     quiet: true
 
+# The app container must be ours: AWG up, the NAT rules that keep user UDP off
+# the AWG port (the reply exception relies on them), and the image built by
+# entry_app (an app reinstall rebuilds amnezia-awg2 from upstream).
+- name: Inspect the app container
+  ansible.builtin.shell:
+    cmd: |
+      {% raw %}
+      set -o pipefail
+      docker exec amnezia-awg2 awg show awg0 > /dev/null && echo awg=up
+      echo "to_ports=$(docker exec amnezia-awg2 iptables -t nat -S POSTROUTING | grep -c -- '-p udp .*--to-ports')"
+      img=$(docker inspect -f '{{.Image}}' amnezia-awg2)
+      echo "label=$(docker image inspect -f '{{index .Config.Labels "org.multihop.build"}}' "$img")"
+      {% endraw %}
+    executable: /bin/bash
+  register: verify_app
+  changed_when: false
+  failed_when: false
+
+- name: Assert the app container is the one entry_app builds
+  ansible.builtin.assert:
+    that:
+      - "'awg=up' in verify_app.stdout_lines"
+      - "'to_ports=2' in verify_app.stdout_lines"
+      - verify_app.stdout is search('(?m)^label=[0-9a-f]{64}$')
+    fail_msg: >-
+      amnezia-awg2 is not the container entry_app builds ({{ verify_app.stdout_lines | join(', ') }}
+      {{ verify_app.stderr | default('') | trim }}): expected awg=up, to_ports=2 and an
+      org.multihop.build label. If the app reinstalled it, run playbooks/restore.yml.
+    quiet: true
+
 - name: Wait for a fresh uplink handshake
   ansible.builtin.import_tasks: wait-handshake.yml
 

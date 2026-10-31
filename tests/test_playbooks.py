@@ -213,3 +213,28 @@ def test_entry_uplink_applies_its_handlers_before_the_next_role():
     container = next(i for i, t in enumerate(tasks)
                      if t.get("name") == "Run multihop-uplink container")
     assert container < len(tasks) - 1  # the restart handler finds the container
+
+
+def _tasks_by_name(path):
+    return {t.get("name"): t for t in yaml.safe_load((ROOT / path).read_text())}
+
+
+def test_app_image_rebuilt_unless_it_carries_our_build_label():
+    # An app reinstall rebuilds `amnezia-awg2` from upstream (no exclusion of the
+    # AWG port in the UDP masquerade); a restore must not reuse that image.
+    tasks = _tasks_by_name("roles/entry_app/tasks/main.yml")
+    build = tasks["Build the app image"]["community.docker.docker_image"]
+    assert build["build"]["labels"] == {"org.multihop.build": "{{ entry_app_build_id | trim }}"}
+    assert "entry_app_image_build_label" in build["force_source"]
+    assert "entry_app_build_id" in build["force_source"]
+    decide = tasks["Decide whether the app image must be built"]["ansible.builtin.set_fact"]
+    assert "stat.checksum" in decide["entry_app_build_id"]
+    assert "org.multihop.build" in decide["entry_app_image_build_label"]
+
+
+def test_verify_checks_the_app_container_is_ours():
+    tasks = _tasks_by_name("playbooks/tasks/verify-entry.yml")
+    that = tasks["Assert the app container is the one entry_app builds"]["ansible.builtin.assert"]["that"]
+    assert "'awg=up' in verify_app.stdout_lines" in that
+    assert "'to_ports=2' in verify_app.stdout_lines" in that
+    assert any("label=[0-9a-f]{64}" in c for c in that)

@@ -85,38 +85,54 @@
     src: Dockerfile
     dest: "{{ entry_app_build_dir }}/Dockerfile"
     mode: "0644"
-  register: entry_app_stage_dockerfile
 
 - name: Stage start.sh
   ansible.builtin.template:
     src: start.sh.j2
     dest: "{{ entry_app_build_dir }}/start.sh"
     mode: "0755"
-  register: entry_app_stage_start
+
+- name: Checksum the staged build context
+  ansible.builtin.stat:
+    path: "{{ entry_app_build_dir }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop: [Dockerfile, start.sh]
+  register: entry_app_context
 
 - name: Inspect the pinned base image
   community.docker.docker_image_info:
     name: multihop/awg-base:pinned
   register: entry_app_base_info
 
-# A retagged base image changes this marker and forces a rebuild.
-- name: Record base image id
-  ansible.builtin.copy:
-    content: "{{ (entry_app_base_info.images | map(attribute='Id') | first | default('')) }}\n"
-    dest: "{{ entry_app_build_dir }}/base.id"
-    mode: "0644"
-  register: entry_app_stage_base
+- name: Inspect the current app image
+  community.docker.docker_image_info:
+    name: "{{ entry_app_container }}"
+  register: entry_app_image_info
+
+# Our build is identified by a label over its inputs. An image without it (or
+# with another value) was not built from this context, e.g. the Amnezia app
+# rebuilt amnezia-awg2 from upstream on a reinstall, or an earlier build
+# failed: rebuild it, and the container below is recreated from our image.
+- name: Decide whether the app image must be built
+  ansible.builtin.set_fact:
+    entry_app_build_id: >-
+      {{ ((entry_app_context.results | map(attribute='stat.checksum') | list)
+          + [entry_app_base_info.images | map(attribute='Id') | first | default('')])
+         | join(':') | hash('sha256') }}
+    entry_app_image_build_label: >-
+      {{ (((entry_app_image_info.images | first | default({})).Config | default({})).Labels | default({}, true))
+         ['org.multihop.build'] | default('') }}
 
 - name: Build the app image
   community.docker.docker_image:
     name: "{{ entry_app_container }}"
     source: build
-    force_source: >-
-      {{ entry_app_stage_dockerfile.changed or entry_app_stage_start.changed
-         or entry_app_stage_base.changed }}
+    force_source: "{{ entry_app_image_build_label | trim != entry_app_build_id | trim }}"
     build:
       path: "{{ entry_app_build_dir }}"
       pull: false
+      labels:
+        org.multihop.build: "{{ entry_app_build_id | trim }}"
 
 - name: Run the app container
   community.docker.docker_container:
