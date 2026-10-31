@@ -456,9 +456,13 @@ rules dropping it).
 ### 8.7 Verification built into the playbooks
 
 - `exit.yml`: the container is running and listening on the UDP port.
-- `entry.yml`: the uplink has a recent handshake with the exit, and a
-  `curl --interface` style check (or check from inside a test netns or the
-  `amnezia-awg2` container) shows the **exit's** public IP.
+- `entry.yml` does **not** verify itself (accepted deviation): the path
+  checks live in `verify.yml` (`playbooks/tasks/verify-entry.yml`), which
+  `site.yml`, `swap-exit.yml` and `swap-entry.yml` run at the end. It checks
+  the uplink handshake, that a request from inside `amnezia-awg2` raises the
+  exit's tunnel counters and shows the **exit's** public IP, the public
+  interface's routing group, and that `amnezia-awg2` is the container
+  entry_app builds (AWG up, the two UDP `--to-ports` rules, the build label).
 - **Fail-closed test:** a separate `verify.yml` (optional) stops the uplink,
   confirms traffic from the app container is dropped (does not show the
   entry's IP), then starts the uplink again.

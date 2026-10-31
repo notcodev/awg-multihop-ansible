@@ -1,5 +1,9 @@
 ---
+# Bounds around the versions this project was tested with (lab run 2026-10-31).
 collections:
   - name: community.docker
+    version: ">=5.4.0,<6.0.0"
   - name: community.general
+    version: ">=13.5.0,<14.0.0"
   - name: ansible.posix
+    version: ">=2.2.2,<3.0.0"

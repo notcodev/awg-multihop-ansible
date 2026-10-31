@@ -61,12 +61,12 @@ Minimal key policies (tested on Timeweb Cloud S3): writer `PutObject`, `AbortMul
    ```bash
    uv run scripts/gen-secrets.py all > inventories/prod/group_vars/all/vault.yml
    uv run scripts/gen-secrets.py uplink-key > inventories/prod/group_vars/all/vault_uplink.yml
-   age-keygen -o age.key          # prints the public key; keep age.key out of the repo
+   mkdir -p ~/.config/multihop && age-keygen -o ~/.config/multihop/age.key   # prints the public key; keep the key out of the repo
    $EDITOR inventories/prod/group_vars/all/vault.yml
    uv run ansible-vault encrypt inventories/prod/group_vars/all/vault.yml inventories/prod/group_vars/all/vault_uplink.yml
    ```
 
-   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `age.key`). Only now put the age **public** key (printed by `age-keygen`) in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
+   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `~/.config/multihop/age.key`). Only now put the age **public** key (printed by `age-keygen`) in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
 
 4. Create DNS A records for `entry_domain` and `exit_domain` pointing at the servers, with a **low TTL (60-300 s)**. The exit swap and the entry re-resolve timer rely on it.
 
@@ -98,6 +98,17 @@ Add the server by **domain** (`entry_domain`) with an SSH user that has sudo. Th
 - **Do not use the app's "remove / reinstall protocol", and do not edit AmneziaWG settings in the app.** The app reinstalls the container: new server keys, an empty user list, and our bind mount and the fixed NAT port range are gone. Every issued key stops working.
 - Reinstalling also removes the container's fixed NAT port range, the basis of the AWG UDP reply exception, so user UDP from source port `entry_awg_port` could then leave via the entry's own IP.
 - Drift detection: the backup timer checks every run that `amnezia-awg2` still has the bind mount. If not, `multihop-backup` exits with code 2 and writes `/var/lib/multihop/backup/DRIFT`, and `entry.yml` fails with recovery instructions. Look for it with `systemctl status multihop-backup.service` and `journalctl -u multihop-backup`.
+
+## Operator constraints
+
+- `entry.yml` needs a working exit: the `amnezia-awg2` image build (and any traffic from the entry's containers) goes through the uplink.
+- `entry_awg_port` and `entry_awg_subnet` cannot change after the first deploy: `awg0.conf` is written only when absent, and a restore refuses a backup with another port or subnet.
+- Docker on the entry does not start if the routing and firewall rules cannot be applied (`ExecStartPre=multihop-entry-net up`): fail-closed rather than forwarding through the entry's IP. Check `systemctl status docker` and `journalctl -u docker` if it stays down.
+- Traffic from the entry's containers may leave only through the uplink, the public interface (direct split list and the AWG server's own UDP), or another Docker bridge. Anything to other NICs (e.g. a provider private network) is dropped. The exit also drops user traffic to private, CGNAT and link-local ranges (provider metadata).
+- After an entry swap with the old entry unreachable, retire the old entry if it comes back: stop `amnezia-awg2` and `multihop-uplink` and disable `multihop-backup.timer`. Its backup timer can otherwise overwrite `latest`.
+- Old entry reachable, but its final backup fails (e.g. drift after an app reinstall): fix it first (`restore.yml` against the old entry, then retry the swap), or deliberately take the unreachable path (power it off) and accept losing users added since the last good backup.
+- Keep these outside the repository and back them up: the vault files, the vault password and the age identity. The vault is the only copy of the exit identity and the entry-uplink key; without the age identity no backup can be restored.
+- The vendored app Dockerfile keeps the app's `apk add` / `apk upgrade` steps (parity with the app). Only the base image is pinned, so the apk layer can change whenever the image is rebuilt.
 
 ## Recovery
 
