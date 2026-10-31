@@ -39,6 +39,14 @@
     - Reload systemd
     - Reload multihop-net
 
+- name: Keep the public interface's group across NIC renames and re-creation
+  ansible.builtin.template:
+    src: 90-multihop-public-group.rules.j2
+    dest: /etc/udev/rules.d/90-multihop-public-group.rules
+    mode: "0644"
+    owner: root
+    group: root
+
 - name: Create docker.service drop-in directory
   ansible.builtin.file:
     path: /etc/systemd/system/docker.service.d

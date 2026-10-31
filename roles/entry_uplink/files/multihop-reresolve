@@ -15,6 +15,13 @@ IFACE=awg-uplink
 
 log() { echo "${0##*/}: $*" >&2; }
 
+# Keep the public interface in the group that rule 10120 (multihop-entry-net)
+# suppresses: a renamed or re-created NIC loses it, and then container DNS
+# via provider host routes is dropped again. Cheap and idempotent.
+if [ -n "${PUBLIC_IFACE:-}" ]; then
+  ip link set dev "$PUBLIC_IFACE" group 51820 || log "cannot set the group of $PUBLIC_IFACE"
+fi
+
 addr=$(getent ahostsv4 "$EXIT_DOMAIN" | awk 'NR==1{print $1}') || addr=""
 if ! [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
   log "cannot resolve $EXIT_DOMAIN (got '${addr}'), keeping current endpoint"

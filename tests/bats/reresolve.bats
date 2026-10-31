@@ -9,9 +9,11 @@ setup() {
 EXIT_DOMAIN=exit.example.com
 EXIT_PORT=27887
 EXIT_PUBKEY=$PUB
+PUBLIC_IFACE=eth9
 ENV
   # awg show <iface> endpoints: "<pubkey> <ip:port>" per peer
   stub docker "$PUB 198.51.100.7:27887"
+  stub ip
   : > "$STUB_LOG"
 }
 
@@ -89,4 +91,24 @@ A
   run_script multihop-reresolve
   [ "$status" -ne 0 ]
   ! grep -q -e 'awg set' "$STUB_LOG" || false
+}
+
+# The public interface's group (rule 10120 in multihop-entry-net) is lost when
+# the NIC is renamed or re-created; every run puts it back, whatever DNS says.
+@test "re-asserts the public interface group even when DNS fails" {
+  getent_answer 2 < /dev/null
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  grep -qx -e 'ip link set dev eth9 group 51820' "$STUB_LOG"
+}
+
+@test "a failing group re-assert does not stop the re-resolve" {
+  stub ip "" 1
+  getent_answer <<'A'
+203.0.113.9     STREAM exit.example.com
+A
+  run_script multihop-reresolve
+  [ "$status" -eq 0 ]
+  grep -qF "cannot set the group of eth9" <<<"$output"
+  grep -qxF -e "docker exec multihop-uplink awg set awg-uplink peer $PUB endpoint 203.0.113.9:27887" "$STUB_LOG"
 }

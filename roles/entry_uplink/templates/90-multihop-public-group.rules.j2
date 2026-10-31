@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Put the entry's public interface (matched by MAC, so a rename or re-created
+# NIC still matches) in group 51820, which rule 10120 of multihop-entry-net
+# suppresses for bridge traffic. multihop-reresolve re-asserts it every minute.
+ACTION=="add|move", SUBSYSTEM=="net", ATTR{address}=="{{ ansible_default_ipv4.macaddress }}", RUN+="/usr/sbin/ip link set dev $name group 51820"

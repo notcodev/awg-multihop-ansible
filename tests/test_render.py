@@ -237,3 +237,13 @@ def test_start_sh_udp_masquerade_excludes_awg_port(port, expected):
         assert (lo, hi) == expected
         assert not lo <= port <= hi
         assert hi - lo + 1 >= 10000
+
+
+def test_public_iface_group_udev_rule_matches_the_mac():
+    # The group rule 10120 suppresses must survive a NIC rename/re-creation.
+    text = render("roles/entry_uplink/templates/90-multihop-public-group.rules.j2",
+                  "90-multihop-public-group.rules",
+                  {"ansible_default_ipv4": {"macaddress": "52:54:00:12:34:56"}})
+    rules = [line for line in text.splitlines() if line and not line.startswith("#")]
+    assert rules == ['ACTION=="add|move", SUBSYSTEM=="net", ATTR{address}=="52:54:00:12:34:56", '
+                     'RUN+="/usr/sbin/ip link set dev $name group 51820"']

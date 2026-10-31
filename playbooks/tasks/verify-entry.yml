@@ -6,6 +6,24 @@
 #      IPv4, so facts must have been gathered on the exit (verify.yml does).
 # Inputs: verify_ip_echo_url (default https://api.ipify.org),
 #         verify_compare_ips, wait_handshake_retries.
+- name: Read the public interface's group
+  ansible.builtin.shell:
+    cmd: set -o pipefail; . /etc/multihop/multihop.env; ip -d link show dev "$PUBLIC_IFACE" | head -n 1
+    executable: /bin/bash
+  register: verify_public_group
+  changed_when: false
+
+# Rule 10120 suppresses this group; without it bridge traffic takes provider
+# host routes via the public interface and is dropped (container DNS breaks).
+- name: Assert the public interface is in group 51820
+  ansible.builtin.assert:
+    that: verify_public_group.stdout is search('\\bgroup 51820\\b')
+    fail_msg: >-
+      The public interface is not in group 51820 ({{ verify_public_group.stdout }}).
+      Run `systemctl reload multihop-net` on the entry and check
+      /etc/udev/rules.d/90-multihop-public-group.rules.
+    quiet: true
+
 - name: Wait for a fresh uplink handshake
   ansible.builtin.import_tasks: wait-handshake.yml
 

@@ -195,7 +195,7 @@ On the entry:
 docker exec amnezia-awg2 awg show               # users and handshakes
 docker exec multihop-uplink awg show awg-uplink # uplink handshake and endpoint
 ip rule show                                    # priorities 10100, 10110, 10120, 10130
-ip -d link show <public iface> | grep group      # group 51820: rule 10120 ignores its routes
+ip -d link show <public iface> | grep group      # group 51820: rule 10120 ignores its routes (udev rule + re-resolve timer keep it; verify.yml checks it)
 ip route show table multihop
 iptables -S MULTIHOP-FWD
 iptables -t mangle -S MULTIHOP-MARK
