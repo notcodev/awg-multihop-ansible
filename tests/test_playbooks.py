@@ -253,3 +253,13 @@ def test_docker_cannot_start_without_the_entry_rules():
     unit = _unit("roles/entry_uplink/files/docker-multihop.conf")
     assert unit["Service"]["ExecStartPre"] == "/usr/local/sbin/multihop-entry-net up"
     assert "multihop-net.service" in unit["Unit"]["After"]
+
+
+def test_exit_forwarding_comes_back_with_docker():
+    # multihop-net (exit) is PartOf docker and stops with it; starting Docker
+    # again must start it too, or the exit forwards nothing until a reboot.
+    unit = _unit("roles/exit/files/docker-multihop.conf")
+    assert "multihop-net.service" in unit["Unit"]["Wants"]
+    tasks = _tasks_by_name("roles/exit/tasks/main.yml")
+    dropin = tasks["Start multihop-net whenever Docker starts"]["ansible.builtin.copy"]
+    assert dropin["dest"] == "/etc/systemd/system/docker.service.d/multihop.conf"

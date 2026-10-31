@@ -32,6 +32,23 @@
     - Reload systemd
     - Reload multihop-net
 
+- name: Create docker.service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Start multihop-net whenever Docker starts
+  ansible.builtin.copy:
+    src: docker-multihop.conf
+    dest: /etc/systemd/system/docker.service.d/multihop.conf
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload systemd
+
 - name: Create exit state directory
   ansible.builtin.file:
     path: "{{ exit_state_dir }}"
