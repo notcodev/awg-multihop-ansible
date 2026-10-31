@@ -71,7 +71,7 @@
       community.docker.docker_image_tag:
         name: "{{ common_base_image }}@{{ awg_base_image_digest }}"
         repository: "{{ common_base_image_tag }}"
-        force: true
+        existing_images: overwrite
 
     # Keep `docker images` free of the upstream name; only the digest
     # reference is removed, the multihop tag stays.
