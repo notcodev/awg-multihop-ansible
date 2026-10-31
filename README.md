@@ -41,6 +41,8 @@ Servers: two Ubuntu 24.04 hosts with SSH and sudo. Set `ansible_host` of the ent
 
 S3: a **dedicated bucket** with **versioning enabled** (enable it in the provider; the entry's writer key can overwrite or delete objects, versioning is what covers that). Two credential sets: a writer (goes on the entry) and a reader (controller only). They can be the same key if the provider cannot separate them.
 
+Minimal key policies (tested on Timeweb Cloud S3): writer `PutObject`, `AbortMultipartUpload`, `ListMultipartUploadParts` on `<bucket>/<prefix>/*` plus `GetBucketVersioning` on the bucket; reader `GetObject`, `GetObjectVersion` on the prefix plus `ListBucket`, `ListBucketVersions`, `GetBucketVersioning` on the bucket. The AWS CLI's default addressing (path-style with `--endpoint-url`) works there, and so does virtual-hosted. `entry.yml` prints a warning when `get-bucket-versioning` does not report `Enabled`. On that provider a denied request returns an empty error message, which AWS CLI 2.39 reports as `argument of type 'NoneType' is not a container or iterable` instead of `AccessDenied`.
+
 ## First deploy
 
 1. Copy the inventory and edit it:
