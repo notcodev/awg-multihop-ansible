@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up the entry user state periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ backup_interval }}
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,136 @@
+---
+- name: Fail early on an unsupported architecture
+  ansible.builtin.assert:
+    that: ansible_architecture in backup_aws_cli_arch
+    fail_msg: "No AWS CLI v2 build for architecture {{ ansible_architecture }}"
+
+- name: Install age and unzip
+  ansible.builtin.apt:
+    name: [age, unzip]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Check for AWS CLI v2
+  ansible.builtin.command: aws --version
+  register: backup_aws_version
+  changed_when: false
+  failed_when: false
+
+- name: Install AWS CLI v2 from the official zip
+  when: >-
+    backup_aws_version.rc != 0 or
+    not ((backup_aws_version.stdout | default('')) is match('aws-cli/2'))
+  block:
+    - name: Create download directory
+      ansible.builtin.file:
+        path: "{{ backup_aws_cli_tmp }}"
+        state: directory
+        mode: "0700"
+
+    - name: Download the AWS CLI v2 zip
+      ansible.builtin.get_url:
+        url: "{{ backup_aws_cli_url }}"
+        dest: "{{ backup_aws_cli_tmp }}/awscliv2.zip"
+        mode: "0600"
+
+    - name: Unpack the AWS CLI v2 zip
+      ansible.builtin.unarchive:
+        src: "{{ backup_aws_cli_tmp }}/awscliv2.zip"
+        dest: "{{ backup_aws_cli_tmp }}"
+        remote_src: true
+
+    - name: Run the AWS CLI installer
+      ansible.builtin.command: "{{ backup_aws_cli_tmp }}/aws/install --update"
+      changed_when: true
+
+  always:
+    - name: Remove download directory
+      ansible.builtin.file:
+        path: "{{ backup_aws_cli_tmp }}"
+        state: absent
+
+- name: Create credentials directory
+  ansible.builtin.file:
+    path: /etc/multihop/aws
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: Write S3 credentials
+  ansible.builtin.template:
+    src: aws-credentials.j2
+    dest: /etc/multihop/aws/credentials
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+
+# Own marker so the other roles' blocks in multihop.env survive re-runs.
+- name: Write backup keys to multihop.env
+  ansible.builtin.blockinfile:
+    path: /etc/multihop/multihop.env
+    create: true
+    mode: "0644"
+    owner: root
+    group: root
+    marker: "# {mark} ANSIBLE MANAGED BLOCK backup"
+    block: |
+      ENTRY_STATE_DIR={{ entry_state_dir }}
+      S3_ENDPOINT={{ backup_s3_endpoint }}
+      S3_REGION={{ backup_s3_region }}
+      BUCKET={{ backup_s3_bucket }}
+      PREFIX={{ backup_s3_prefix }}
+      AGE_RECIPIENT={{ backup_age_recipient }}
+
+- name: Install multihop-backup
+  ansible.builtin.copy:
+    src: multihop-backup
+    dest: /usr/local/sbin/multihop-backup
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Install backup units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+    owner: root
+    group: root
+  loop:
+    - multihop-backup.service
+    - multihop-backup.timer
+
+- name: Reload systemd units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Best effort: not every provider implements this call. Never fails the play.
+- name: Check bucket versioning
+  ansible.builtin.command: >-
+    aws --profile multihop-backup --endpoint-url {{ backup_s3_endpoint }}
+    s3api get-bucket-versioning --bucket {{ backup_s3_bucket }}
+    --query Status --output text
+  environment:
+    AWS_SHARED_CREDENTIALS_FILE: /etc/multihop/aws/credentials
+    AWS_DEFAULT_REGION: "{{ backup_s3_region }}"
+  register: backup_versioning
+  changed_when: false
+  failed_when: false
+
+- name: Warn if bucket versioning is not enabled
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: versioning on bucket {{ backup_s3_bucket }} is not confirmed
+      Enabled (got "{{ backup_versioning.stdout | default('') | trim }}",
+      rc={{ backup_versioning.rc }}). Enable bucket versioning: it is what
+      protects the backups from being overwritten or deleted.
+  when: (backup_versioning.stdout | default('') | trim) != 'Enabled'
+
+- name: Enable and start backup timer
+  ansible.builtin.systemd_service:
+    name: multihop-backup.timer
+    enabled: true
+    state: started

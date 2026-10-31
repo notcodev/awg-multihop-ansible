@@ -1,0 +1,7 @@
+---
+# Inventory-contract names (backup_*) are set in group_vars; these are internal.
+backup_aws_cli_arch:
+  x86_64: x86_64
+  aarch64: aarch64
+backup_aws_cli_url: "https://awscli.amazonaws.com/awscli-exe-linux-{{ backup_aws_cli_arch[ansible_architecture] }}.zip"
+backup_aws_cli_tmp: /var/tmp/multihop-awscli

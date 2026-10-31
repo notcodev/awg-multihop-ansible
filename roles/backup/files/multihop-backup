@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Encrypted, change-only S3 backup of the entry's user state.
+#
+#   multihop-backup [--force]
+#
+# Exit codes: 0 uploaded or unchanged, 2 drift (amnezia-awg2 lost its bind
+# mount), 1 any other error.
+#
+# Archive: the state dir's files sit at the archive root (`./awg0.conf`, ...),
+# which is what roles/entry_app/tasks/restore.yml expects. The archive is
+# deterministic (sorted, zeroed mtime/owner), so its sha256 only changes when
+# the state changes.
+set -euo pipefail
+umask 077
+
+MULTIHOP_ENV="${MULTIHOP_ENV:-/etc/multihop/multihop.env}"
+STATE="${MULTIHOP_STATE_DIR:-/var/lib/multihop}"
+# MULTIHOP_TAR lets tests swap in a wrapper where GNU tar is not available.
+TAR="${MULTIHOP_TAR:-tar}"
+CONTAINER=amnezia-awg2
+MOUNT_DEST=/opt/amnezia/awg
+
+force=0
+case "${1:-}" in
+  "") ;;
+  --force) force=1 ;;
+  *) echo "usage: multihop-backup [--force]" >&2; exit 1 ;;
+esac
+
+# shellcheck disable=SC1090
+. "$MULTIHOP_ENV"
+: "${ENTRY_STATE_DIR:?ENTRY_STATE_DIR not set in $MULTIHOP_ENV}"
+: "${S3_ENDPOINT:?S3_ENDPOINT not set in $MULTIHOP_ENV}"
+: "${BUCKET:?BUCKET not set in $MULTIHOP_ENV}"
+: "${PREFIX:?PREFIX not set in $MULTIHOP_ENV}"
+: "${AGE_RECIPIENT:?AGE_RECIPIENT not set in $MULTIHOP_ENV}"
+
+export AWS_SHARED_CREDENTIALS_FILE="${AWS_SHARED_CREDENTIALS_FILE:-/etc/multihop/aws/credentials}"
+[ -z "${S3_REGION:-}" ] || export AWS_DEFAULT_REGION="$S3_REGION"
+
+bdir="$STATE/backup"
+mkdir -p "$bdir"
+
+# 1. Drift: the app container must still bind-mount the state directory.
+mounts="$(docker inspect --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CONTAINER" 2>/dev/null || true)"
+if ! printf '%s\n' "$mounts" | grep -qFx "$MOUNT_DEST"; then
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$bdir/DRIFT"
+  echo "ERROR: $CONTAINER lost its bind mount (app reinstall?) — see README \"Recovery\" (playbooks/restore.yml)" >&2
+  exit 2
+fi
+rm -f "$bdir/DRIFT"
+
+sha256() {
+  if command -v sha256sum > /dev/null; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+
+# 2. Deterministic archive, hashed.
+tmp="$(mktemp "$bdir/archive.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+$TAR --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$ENTRY_STATE_DIR" -cf - . > "$tmp"
+hash="$(sha256 < "$tmp")"
+
+# 3. Unchanged?
+if [ "$force" -eq 0 ] && [ -f "$bdir/last.sha256" ] && [ "$(cat "$bdir/last.sha256")" = "$hash" ]; then
+  echo "state unchanged, nothing to upload"
+  exit 0
+fi
+
+# 4. Encrypt and upload, then the latest pointer, then remember the hash.
+name="entry-$(date -u +%Y%m%dT%H%M%SZ)-${hash:0:12}.tar.age"
+key="$PREFIX/$name"
+aws_s3() { aws --profile multihop-backup --endpoint-url "$S3_ENDPOINT" s3 "$@"; }
+
+age -r "$AGE_RECIPIENT" < "$tmp" | aws_s3 cp - "s3://$BUCKET/$key" || { echo "ERROR: upload of $key failed" >&2; exit 1; }
+printf '%s' "$key" | aws_s3 cp - "s3://$BUCKET/$PREFIX/latest" || { echo "ERROR: updating latest pointer failed" >&2; exit 1; }
+printf '%s\n' "$hash" > "$bdir/last.sha256"
+echo "uploaded $key"
