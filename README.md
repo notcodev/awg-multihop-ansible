@@ -66,7 +66,7 @@ Minimal key policies (tested on Timeweb Cloud S3): writer `PutObject`, `AbortMul
    uv run ansible-vault encrypt inventories/prod/group_vars/all/vault.yml inventories/prod/group_vars/all/vault_uplink.yml
    ```
 
-   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `~/.config/multihop/age.key`). Only now put the age **public** key (printed by `age-keygen`) in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
+   In `vault.yml` replace the `CHANGE_ME` values: `vault_backup_writer`, `vault_backup_reader`, and `vault_backup_age_identity` (the `AGE-SECRET-KEY-...` line from `~/.config/multihop/age.key`). Only now put the age **public** key (printed by `age-keygen`) in `vars.yml` as `backup_age_recipient`. The first line of the generated file suggests random ports for `entry_awg_port` / `exit_awg_port`. Each link gets its own random AmneziaWG 3.1 obfuscation values (Jc/Jmin/Jmax, S1–S4, non-overlapping H1–H4 ranges, a DNS-query I1) instead of the app's shared defaults; existing vaults keep their values. See `inventories/example/group_vars/all/vault.yml.example` for the structure (fake values). `vault_uplink.yml` holds `vault_uplink_entry` and is kept separate because swap-entry rotates it.
 
 4. Create DNS A records for `entry_domain` and `exit_domain` pointing at the servers, with a **low TTL (60-300 s)**. The exit swap and the entry re-resolve timer rely on it.
 

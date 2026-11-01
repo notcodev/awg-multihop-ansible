@@ -1,7 +1,13 @@
 """AmneziaWG key/param helpers and Ansible filters.
 
-Defaults mirror AwgInstaller::generateAwgParameters of amnezia-client
+Obfuscation values (Jc/Jmin/Jmax, S1-S4, H1-H4, I1) are randomized per call so
+deployments and links don't share the Amnezia app's fixed defaults. Timings and
+toggles mirror AwgInstaller::generateAwgParameters of amnezia-client
 (commit 7f9b7db, protocolConstants.h namespace awg).
+
+Constraints: amneziawg-go rejects overlapping H ranges and, with a
+HeaderProtectionKey, any S below 12; the Amnezia app rejects equal H values and
+equal padded message sizes (148+S1, 92+S2, 64+S3, 32+S4).
 """
 import base64
 import random
@@ -9,9 +15,14 @@ import random
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-DEFAULT_SPECIAL_JUNK1 = (
-    "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c"
-    "000100010000105a00044d583737>"
+# WireGuard message sizes the app compares padded sizes against.
+_MESSAGE_SIZES = (148, 92, 64, 32)
+
+# Common names for the I1 DNS-query signature packet.
+I1_DOMAINS = (
+    "google.com", "youtube.com", "apple.com", "microsoft.com", "cloudflare.com",
+    "amazon.com", "yandex.ru", "vk.com", "wikipedia.org", "github.com",
+    "icloud.com", "office.com", "whatsapp.net", "telegram.org", "mail.ru",
 )
 
 _LINE_ORDER = [
@@ -52,14 +63,43 @@ def genpsk() -> str:
     return genkey()
 
 
+def _gen_paddings(rng: random.Random) -> list:
+    # S4 pads every data packet, so it stays small; S1-S3 only pad handshakes.
+    while True:
+        s = [rng.randint(15, 150), rng.randint(15, 150), rng.randint(15, 150),
+             rng.randint(12, 32)]
+        if len({m + x for m, x in zip(_MESSAGE_SIZES, s)}) == 4:
+            return s
+
+
+def _gen_headers(rng: random.Random) -> list:
+    # Four disjoint "lo-hi" ranges in [5, 2^31): sorted distinct bounds paired up.
+    bounds = sorted(rng.sample(range(5, 2**31), 8))
+    ranges = [f"{bounds[i]}-{bounds[i + 1]}" for i in range(0, 8, 2)]
+    rng.shuffle(ranges)
+    return ranges
+
+
+def _gen_dns_query(rng: random.Random) -> str:
+    qname = b"".join(
+        bytes([len(label)]) + label.encode() for label in rng.choice(I1_DOMAINS).split(".")
+    )
+    packet = (rng.randbytes(2) + bytes.fromhex("01000001000000000000") + qname
+              + b"\x00" + bytes.fromhex("00010001"))
+    return f"<b 0x{packet.hex()}>"
+
+
 def gen_awg_params(rng: random.Random) -> dict:
+    jmin = rng.randint(10, 100)
+    s = _gen_paddings(rng)
+    h = _gen_headers(rng)
     return {
-        "jc": str(rng.randint(4, 6)),
-        "jmin": "10",
-        "jmax": "50",
-        "s1": "12", "s2": "12", "s3": "12", "s4": "12",
-        "h1": "1", "h2": "2", "h3": "3", "h4": "4",
-        "i1": DEFAULT_SPECIAL_JUNK1,
+        "jc": str(rng.randint(4, 8)),
+        "jmin": str(jmin),
+        "jmax": str(min(jmin + rng.randint(50, 600), 1000)),
+        "s1": str(s[0]), "s2": str(s[1]), "s3": str(s[2]), "s4": str(s[3]),
+        "h1": h[0], "h2": h[1], "h3": h[2], "h4": h[3],
+        "i1": _gen_dns_query(rng),
         "i2": "", "i3": "", "i4": "", "i5": "",
         "header_protection_key": genkey(),
         "content_padding_addition": "",

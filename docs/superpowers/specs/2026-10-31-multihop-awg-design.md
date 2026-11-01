@@ -430,9 +430,10 @@ exit after verification.
 - `group_vars/all/vault.yml` (ansible-vault encrypted): all private keys,
   PSKs, AWG obfuscation parameters for **both** links, S3 credentials, age
   private key.
-- Role defaults hold the app's 3.1 defaults (§6). The two links should
-  **not** share parameter values: each gets its own randomly generated set
-  from the secrets generator.
+- The secrets generator randomizes the obfuscation values (Jc/Jmin/Jmax,
+  S1–S4, H1–H4 ranges, a DNS-query I1) within the limits of amneziawg-go and
+  the Amnezia app, and keeps the app's 3.1 timings and toggles (§6). The two
+  links never share parameter values: each gets its own random set.
 
 ### 8.4 Addressing (defaults, overridable)
 
