@@ -1,6 +1,7 @@
 ---
 # Cloud lab used by tests/integration/run.sh (throwaway x86_64 Ubuntu hosts).
-# `run.sh init` generates the gitignored rest of this inventory from
+# `run.sh init` copies this file to inventories/lab/group_vars/all/vars.yml
+# (the whole inventories/lab/ is gitignored) and generates the rest from
 # tests/integration/.state/lab.env: hosts.yml (IPs, SSH), group_vars/all/lab.yml
 # (AWG ports, S3 location, age recipient) and the encrypted vault.yml,
 # vault_uplink.yml and vault_s3.yml (password in tests/integration/.state/vault-pass).

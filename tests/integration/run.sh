@@ -3,7 +3,7 @@
 # shellcheck disable=SC2016
 # Integration test on throwaway cloud hosts (x86_64 Ubuntu, root SSH).
 #
-#   run.sh init            generate the lab inventory (inventories/lab, gitignored parts);
+#   run.sh init            generate the lab inventory (inventories/lab, gitignored; vars from lab-vars.yml);
 #                          re-run after creating or changing .state/s3.env
 #   run.sh deploy          exit pin + tools, site.yml, test VPN client
 #   run.sh check [NAME..]  run checks (default: all, in order), print PASS/FAIL
@@ -127,6 +127,8 @@ cmd_init() {
   need ENTRY_IP EXIT_IP
   command -v age-keygen >/dev/null || die "age-keygen missing"
   local gv="$INV/group_vars/all"
+  mkdir -p "$gv"
+  cp "$ROOT/tests/integration/lab-vars.yml" "$gv/vars.yml"
   [ -s "$STATE/vault-pass" ] || (umask 077; openssl rand -hex 24 > "$STATE/vault-pass")
   [ -s "$STATE/age.key" ] || (umask 077; age-keygen -o "$STATE/age.key" 2>/dev/null)
   # Server identities: generated once, kept across re-runs.

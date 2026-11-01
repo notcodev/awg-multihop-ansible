@@ -6,8 +6,5 @@ exclude_paths:
   - collections/
   - docs/
   - tests/integration/.state/
-  - inventories/lab/hosts.yml
-  - inventories/lab/group_vars/all/lab.yml
-  - inventories/lab/group_vars/all/vault.yml
-  - inventories/lab/group_vars/all/vault_uplink.yml
-  - inventories/lab/group_vars/all/vault_s3.yml
+  - inventories/lab/
+  - inventories/prod/
